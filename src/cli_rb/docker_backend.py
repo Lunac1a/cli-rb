@@ -1,0 +1,171 @@
+"""A read-only container per tool call. No host execution fallback."""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import threading
+from uuid import uuid4
+
+from cli_rb.snapshot import Snapshot
+
+IMAGE = "python:3.12-slim-bookworm"
+
+
+def docker_executable():
+    found = shutil.which("docker")
+    if found:
+        return found
+    if os.name == "nt":
+        candidate = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Docker/Docker/resources/bin/docker.exe"
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("未找到 Docker，请先安装并启动 Docker Desktop。")
+
+
+def prepare_image():
+    docker = docker_executable()
+    image_name = os.getenv("CLI_RB_IMAGE", IMAGE)
+    if not image_name or image_name.startswith("-") or any(c.isspace() for c in image_name):
+        raise ValueError("无效的 CLI_RB_IMAGE。")
+    check = subprocess.run(
+        [docker, "info", "--format", "{{.OSType}}"], capture_output=True, text=True, timeout=15,
+    )
+    if check.returncode or check.stdout.strip() != "linux":
+        raise RuntimeError("Docker Linux 引擎未就绪；不会改用宿主机执行。")
+    inspect = subprocess.run(
+        [docker, "image", "inspect", image_name, "--format", "{{.Id}}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if inspect.returncode:
+        raise RuntimeError(f"准备镜像缺失：{image_name}。请提前拉取或构建；工具执行期间不会下载镜像。")
+    image = inspect.stdout.strip()
+    if not image.startswith("sha256:") or len(image) != 71:
+        raise RuntimeError("无法确认本地镜像 ID。")
+    return docker, image
+
+
+class DockerReadBackend:
+    def __init__(self, snapshot: Snapshot, docker: str, image: str, *, writable=False):
+        self.snapshot = snapshot
+        self.docker = docker
+        self.image = image
+        self.writable = writable
+        self._lock = threading.RLock()
+        self._active_lock = threading.Lock()
+        self._active = set()
+        self._cancelled = threading.Event()
+        self.command_evidence = []
+        self._mount_writable = writable
+        self._protected = {}
+        self.worker = Path(__file__).with_name("container_worker.py").read_text(encoding="utf-8")
+        self.logs = snapshot.session / "tool-logs"
+        self.logs.mkdir(exist_ok=True)
+        (snapshot.session / "container.json").write_text(
+            json.dumps({"image": image, "network": "none", "user": "65534:65534",
+                        "workspace": "read-write" if writable else "read-only", "mode": snapshot.mode,
+                        "memory": "256m", "cpus": "1"}, indent=2),
+            encoding="utf-8",
+        )
+
+    def command(self, name):
+        workspace = str(self.snapshot.workspace.resolve())
+        if "," in workspace:
+            raise ValueError("工作副本目录不能含逗号。")
+        masks = []
+        if self.snapshot.mode == "direct":
+            for path, is_directory in self._protected.items():
+                if any(c in path for c in (",", "\n", "\r")):
+                    raise ValueError("受保护路径不能安全地挂载；请使用隔离模式。")
+                source = self.snapshot.session / ("mask-dir" if is_directory else "mask-file")
+                if is_directory:
+                    source.mkdir(exist_ok=True)
+                elif not source.exists():
+                    source.write_bytes(b"")
+                masks.extend(["--mount", f"type=bind,source={source},target=/workspace/{path},readonly"])
+        return [
+            self.docker, "run", "--rm", "--pull=never", "--name", name, "-i",
+            "--network=none", "--user", "65534:65534", "--read-only",
+            "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32",
+            "--memory=256m", "--memory-swap=256m", "--cpus=1",
+            *( ["--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777"] if self.writable else []),
+            "--mount", f"type=bind,source={workspace},target=/workspace" + ("" if self._mount_writable else ",readonly"),
+            *masks,
+            "--workdir", "/workspace", self.image, "python", "-I", "-B", "-c", self.worker,
+            *( ["--writable"] if self.writable else []),
+        ]
+
+    def _call(self, action, args):
+        with self._lock:
+            if self._cancelled.is_set():
+                raise RuntimeError("会话已取消，不再执行工具。")
+            return self._execute_call(action, args)
+
+    def _execute_call(self, action, args):
+        name = "cli-rb-" + uuid4().hex
+        if self.snapshot.mode == "direct":
+            from cli_rb.live_workspace import protected_paths
+            self._protected = protected_paths(self.snapshot.workspace)
+        request = json.dumps({"action": action, "args": args, "protected_paths": list(self._protected)}, ensure_ascii=False)
+        journal = self.logs / f"{name}-action.json"
+        journal.write_text(json.dumps({"action": action, "state": "started"}), encoding="utf-8")
+        with self._active_lock:
+            self._active.add(name)
+        try:
+            run = subprocess.run(
+                self.command(name), input=request, capture_output=True, text=True,
+                encoding="utf-8", timeout=(args.get("timeout_seconds", 60) + 15 if action == "command" else 30),
+            )
+            if run.returncode:
+                result = "工具错误：容器执行失败；请检查 Docker。没有回退到宿主机。"
+            else:
+                result = json.loads(run.stdout)["result"]
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            cleanup = subprocess.run(
+                [self.docker, "rm", "--force", name], capture_output=True, timeout=15,
+            )
+            (self.logs / f"{name}-interrupted.json").write_text(
+                json.dumps({"request": json.loads(request), "interrupted": True,
+                            "cleanup_exit": cleanup.returncode}), encoding="utf-8",
+            )
+            raise
+        finally:
+            with self._active_lock:
+                self._active.discard(name)
+        (self.logs / f"{name}.json").write_text(
+            json.dumps({"request": json.loads(request), "result": result,
+                        "exit_code": run.returncode}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        journal.write_text(json.dumps({"action": action,
+                                       "state": "cancelled" if self._cancelled.is_set() else ("returned" if run.returncode == 0 else "uncertain"),
+                                       "container_exit": run.returncode}), encoding="utf-8")
+        (self.logs / f"{name}.txt").write_text(result, encoding="utf-8")
+        if action == "command":
+            try:
+                outcome = json.loads(result)
+                self.command_evidence.append({"command": args["command"],
+                    "exit_code": outcome["exit_code"], "timed_out": outcome["timed_out"], "log_id": name})
+            except (ValueError, KeyError, TypeError):
+                self.command_evidence.append({"command": args["command"], "status": "uncertain", "log_id": name})
+        if len(result) > 16000:
+            hint = f"日志 ID={name}，可用 read_tool_log 从 offset=16000 继续读取" if self.writable else "请缩小 max_lines/limit；完整结果已保存至会话日志"
+            return result[:16000] + f"\n[输出截断；{hint}。]"
+        return result
+
+    def cancel_all(self):
+        self._cancelled.set()
+        with self._active_lock:
+            names = list(self._active)
+        for name in names:
+            subprocess.run([self.docker, "rm", "--force", name], capture_output=True, timeout=15)
+
+    def read_file(self, path, start_line=1, max_lines=80):
+        return self._call("read", {"path": path, "start_line": start_line, "max_lines": max_lines})
+
+    def list_files(self, path=".", offset=0, limit=50):
+        return self._call("list", {"path": path, "offset": offset, "limit": limit})
+
+    def search_files(self, query, path=".", offset=0, limit=50):
+        return self._call("search", {"query": query, "path": path, "offset": offset, "limit": limit})

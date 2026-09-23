@@ -80,3 +80,37 @@ def test_paged_read_and_missing_file():
     assert tool.invoke({"path": "a", "start_line": 3}) == "3: three"
     assert tool.invoke({"path": "missing"}).startswith("工具错误")
     assert tool.invoke({"path": "a", "max_lines": 201}).startswith("工具错误")
+
+
+def test_empty_reply_recovers_once_without_replaying_tools():
+    backend = FixtureBackend({'README.md': 'evidence'})
+    model = ScriptedModel(replies=[request('README.md', 'read'), AIMessage(content=''), AIMessage(content='已读取 evidence；没有执行测试。')])
+    history = [HumanMessage(content='读文件')]
+    returned = []
+    for message in stream_turn(build_agent(model, backend), history):
+        returned.append(message)
+        history.append(message)
+    assert len(model.seen) == 3
+    assert sum(isinstance(m, ToolMessage) for m in returned) == 1
+    assert sum(isinstance(m, ToolMessage) for m in model.seen[-1]) == 1
+    assert returned[-1].response_metadata['final_reply_recovery'] == 'recovered'
+    assert '没有执行测试' in returned[-1].content
+
+
+@pytest.mark.parametrize('last', [AIMessage(content='  '), request('README.md', 'forbidden')])
+def test_recovery_cannot_execute_tools_or_loop(last):
+    model = ScriptedModel(replies=[AIMessage(content=''), last])
+    returned = list(stream_turn(build_agent(model, demo_backend()), [HumanMessage(content='你好')]))
+    assert len(model.seen) == 2
+    assert returned[-1].content == ''
+    assert not returned[-1].tool_calls
+    assert returned[-1].response_metadata['final_reply_recovery'] == 'empty_or_tool_request'
+    assert not any(isinstance(m, ToolMessage) for m in returned)
+
+
+def test_recovery_error_preserves_existing_evidence():
+    model = ScriptedModel(replies=[request('README.md', 'read'), AIMessage(content='')])
+    returned = list(stream_turn(build_agent(model, demo_backend()), [HumanMessage(content='读文件')]))
+    assert any(isinstance(m, ToolMessage) for m in returned)
+    assert returned[-1].response_metadata['final_reply_recovery'] == 'request_failed'
+    assert returned[-1].response_metadata['error_type'] == 'IndexError'

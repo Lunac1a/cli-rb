@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 import httpx
 
 from cli_rb.config import ModelConfig
+from cli_rb.docker_backend import docker_executable
 
 
 @dataclass
@@ -40,7 +41,10 @@ def inspect_environment(config: ModelConfig) -> list[dict]:
     checks.append(command_check("uv", ["uv", "--version"]))
     if platform.system() == "Windows":
         checks.append(command_check("WSL", ["wsl", "--status"]))
-    checks.append(command_check("Docker", ["docker", "version"]))
+    try:
+        checks.append(command_check("Docker", [docker_executable(), "version"]))
+    except RuntimeError as error:
+        checks.append(Check("Docker", False, str(error)))
     try:
         response = httpx.get(
             config.base_url.rstrip("/") + "/models", timeout=5, trust_env=False,
