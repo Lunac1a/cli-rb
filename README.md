@@ -1,6 +1,6 @@
 # CLI Rb
 
-自然语言 CLI 编码 Agent，按 [实施计划](docs/PLAN.md) 逐块开发。
+自然语言 CLI 编码 Agent，连接本地模型，在受控 Docker 环境中阅读、修改和验证代码。
 
 **当前状态：阶段 1 最小闭环工程验收完成；默认直接修改本地工作区，关键操作授权。**
 已接入 LangChain `create_agent`、本地 OpenAI-compatible 模型适配、终端对话、
@@ -86,7 +86,7 @@ Enter 换行，Alt+Enter 提交（也可先 Esc 再 Enter），Ctrl+D 或 Ctrl+C
 长行和超长工具输出有显式截断说明，工具完整返回文本保存在本地日志中。
 模型可通过 `read_tool_log` 按字符位置继续读取。模型没有最终文字答复时，最多请求一次无工具的说明补全，并标明恢复状态；不会重跑编辑或命令。
 补全仍失败则展示实际命令记录和最近导出路径，不自行宣称任务成功。补全只负责报告，未完成步骤必须如实指出。
-本地模型仍可能返回空正文；这是应用层恢复，不代表底层原因已消除。详见 [恢复决策](docs/architecture/0005-empty-final-reply.md)。
+本地模型仍可能返回空正文；这是应用层恢复，不代表底层原因已消除。
 
 ## 依赖与补丁
 
@@ -125,13 +125,11 @@ uv run pytest -q -p no:cacheprovider
 Agent 使用 100 个图步骤的上限（不是模型/工具调用预算）。
 计划中的 50/100 调用计数和 10 分钟总预算尚未实现。
 
-## 阅读路线
+## 项目结构
 
-- [第一块机制与学习记录](docs/learning/01-tool-roundtrip.md)
-- [第二块：仓库副本与 Docker](docs/learning/02-workspace-sandbox.md)
-- [第三块：修改、验证与补丁](docs/learning/03-edit-test-patch.md)
-- [架构决策](docs/architecture/0001-first-slice.md)
-- [验收证据与剩余工作](docs/STATUS.md)
+- `src/cli_rb/`：终端入口、Agent 循环、工作区工具与 Docker 后端。
+- `tests/`：工具往返、文件编辑、权限边界和 Docker 集成测试。
+- `pyproject.toml`、`uv.lock`：项目配置与锁定依赖。
 
 源码入口 `src/cli_rb/cli.py`；框架循环接线在 `src/cli_rb/agent.py`，
-工具和后端边界在 `src/cli_rb/workspace.py`。原有 PyCharm 示例 `main.py` 保持不变。
+工具和后端边界在 `src/cli_rb/workspace.py`。
