@@ -13,6 +13,18 @@ from cli_rb.snapshot import Snapshot
 IMAGE = "python:3.12-slim-bookworm"
 
 
+def ensure_session_stopped(directory: Path, docker: str):
+    """A crashed host can leave a container alive; never recover over it."""
+    names = {p.name.removesuffix('-action.json') for p in (directory / 'tool-logs').glob('*-action.json')}
+    result = subprocess.run([docker, 'ps', '-a', '--format', '{{.Names}}'],
+                            capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise RuntimeError('无法确认旧容器已结束，拒绝继续。')
+    remaining = names.intersection(result.stdout.splitlines())
+    if remaining:
+        raise RuntimeError('旧会话仍有容器存在，先停止并清理后再恢复：' + ', '.join(sorted(remaining)))
+
+
 def docker_executable():
     found = shutil.which("docker")
     if found:
@@ -24,9 +36,9 @@ def docker_executable():
     raise RuntimeError("未找到 Docker，请先安装并启动 Docker Desktop。")
 
 
-def prepare_image():
+def prepare_image(image_name=None):
     docker = docker_executable()
-    image_name = os.getenv("CLI_RB_IMAGE", IMAGE)
+    image_name = image_name or os.getenv("CLI_RB_IMAGE", IMAGE)
     if not image_name or image_name.startswith("-") or any(c.isspace() for c in image_name):
         raise ValueError("无效的 CLI_RB_IMAGE。")
     check = subprocess.run(
@@ -85,7 +97,7 @@ class DockerReadBackend:
                     source.write_bytes(b"")
                 masks.extend(["--mount", f"type=bind,source={source},target=/workspace/{path},readonly"])
         return [
-            self.docker, "run", "--rm", "--pull=never", "--name", name, "-i",
+            self.docker, "create", "--pull=never", "--name", name, "-i",
             "--network=none", "--user", "65534:65534", "--read-only",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32",
             "--memory=256m", "--memory-swap=256m", "--cpus=1",
@@ -110,11 +122,22 @@ class DockerReadBackend:
         request = json.dumps({"action": action, "args": args, "protected_paths": list(self._protected)}, ensure_ascii=False)
         journal = self.logs / f"{name}-action.json"
         journal.write_text(json.dumps({"action": action, "state": "started"}), encoding="utf-8")
-        with self._active_lock:
-            self._active.add(name)
         try:
+            # Creation does not execute the worker. Cancellation must either stop
+            # creation or see its registered name before returning from cleanup.
+            with self._active_lock:
+                if self._cancelled.is_set():
+                    raise RuntimeError("会话已取消，不再执行工具。")
+                self._active.add(name)
+                created = subprocess.run(self.command(name), capture_output=True, timeout=30)
+                if created.returncode:
+                    raise RuntimeError("容器创建失败；没有执行工具。")
+            # A late start cannot recreate a container removed by cancel_all.
+            if self._cancelled.is_set():
+                raise RuntimeError("会话已取消，不再执行工具。")
             run = subprocess.run(
-                self.command(name), input=request, capture_output=True, text=True,
+                [self.docker, "start", "--attach", "--interactive", name],
+                input=request, capture_output=True, text=True,
                 encoding="utf-8", timeout=(args.get("timeout_seconds", 60) + 15 if action == "command" else 30),
             )
             if run.returncode:
@@ -131,8 +154,12 @@ class DockerReadBackend:
             )
             raise
         finally:
-            with self._active_lock:
-                self._active.discard(name)
+            # Also remove containers that were created but never started.
+            try:
+                subprocess.run([self.docker, "rm", "--force", name], capture_output=True, timeout=15)
+            finally:
+                with self._active_lock:
+                    self._active.discard(name)
         (self.logs / f"{name}.json").write_text(
             json.dumps({"request": json.loads(request), "result": result,
                         "exit_code": run.returncode}, ensure_ascii=False, indent=2),

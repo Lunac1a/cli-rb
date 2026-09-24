@@ -39,6 +39,27 @@ class Snapshot:
     workspace: Path
     manifest: dict
     mode: str = "isolated"
+    resumed: bool = False
+
+
+def load_snapshot(directory: Path) -> Snapshot:
+    session = directory.resolve(strict=True)
+    manifest = json.loads((session / 'manifest.json').read_text(encoding='utf-8'))
+    mode = manifest.get('mode')
+    if manifest.get('status') != 'ready' or mode not in {'direct', 'isolated'}:
+        raise ValueError('会话基线或模式不支持恢复。')
+    workspace = Path(manifest['source']) if mode == 'direct' else session / 'workspace'
+    if not workspace.is_dir():
+        raise ValueError('原工作区不存在，拒绝恢复。')
+    from cli_rb.patches import file_bytes
+    baseline = session / ('workspace' if mode == 'direct' else 'baseline')
+    for name, digest in manifest['files'].items():
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or '..' in relative.parts or '\\' in name or ':' in name:
+            raise ValueError('会话基线路径无效。')
+        if hashlib.sha256(file_bytes(baseline, name)).hexdigest() != digest:
+            raise ValueError('会话起点基线已改变，拒绝恢复。')
+    return Snapshot(session, workspace.resolve(), manifest, mode, resumed=True)
 
 
 def create_snapshot(source: Path, sessions: Path) -> Snapshot:

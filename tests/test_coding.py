@@ -1,14 +1,14 @@
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 
+from cli_rb.cli import report_empty_reply
 from cli_rb.container_worker import execute
 from cli_rb.patches import PatchService, text_patch
 from cli_rb.snapshot import create_snapshot
-from cli_rb.cli import report_empty_reply
-from langchain_core.messages import AIMessage
-from types import SimpleNamespace
 
 
 def test_edit_rejects_stale_or_ambiguous_content(tmp_path):

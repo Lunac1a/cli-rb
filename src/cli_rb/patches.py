@@ -96,6 +96,8 @@ class PatchService:
             self.baseline = snapshot.session / "workspace"
             return
         self.baseline = snapshot.session / "baseline"
+        if snapshot.resumed:
+            return  # load_snapshot already verified the original baseline hashes.
         self.baseline.mkdir(exist_ok=False)
         for name, digest in snapshot.manifest["files"].items():
             content = file_bytes(snapshot.workspace, name)

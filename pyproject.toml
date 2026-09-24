@@ -10,6 +10,7 @@ dependencies = [
   "prompt-toolkit>=3.0,<4",
   "typer>=0.16,<1",
   "httpx>=0.28,<1",
+  "langgraph-checkpoint-sqlite>=3,<4",
 ]
 
 [dependency-groups]

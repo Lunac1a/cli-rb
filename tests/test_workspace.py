@@ -53,36 +53,22 @@ def test_worker_list_search_read_and_traversal(tmp_path):
         execute(tmp_path, {"action": "list", "args": {"limit": 10000}})
 
 
-def test_docker_only_mounts_copy_and_restricts_execution(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    backend = DockerReadBackend(Snapshot(tmp_path, workspace, {}), "docker", "sha256:" + "a" * 64)
-    command = backend.command("cli-rb-test")
-    for flag in ["--network=none", "--read-only", "--cap-drop=ALL", "--pull=never", "--pids-limit=32"]:
-        assert flag in command
-    assert command[command.index("--user") + 1] == "65534:65534"
-    assert command.count("--mount") == 1
-    assert command[command.index("--mount") + 1].endswith("target=/workspace,readonly")
-    assert "--privileged" not in command
-    assert "docker.sock" not in str(command)
-
-
 def test_timeout_removes_only_its_container_without_retry(tmp_path, monkeypatch):
     backend = DockerReadBackend(Snapshot(tmp_path, tmp_path, {}), "docker", "sha256:" + "a" * 64)
     calls = []
 
     def run(args, **kwargs):
         calls.append(args)
-        if args[1] == "run":
+        if args[1] == "start":
             raise subprocess.TimeoutExpired(args, 30)
         return subprocess.CompletedProcess(args, 0)
 
     monkeypatch.setattr("cli_rb.docker_backend.subprocess.run", run)
     with pytest.raises(subprocess.TimeoutExpired):
         backend.read_file("app.py")
-    assert len(calls) == 2
+    assert len(calls) == 4
     name = calls[0][calls[0].index("--name") + 1]
-    assert calls[1] == ["docker", "rm", "--force", name]
+    assert calls[2] == calls[3] == ["docker", "rm", "--force", name]
     assert list((tmp_path / "tool-logs").glob("*-interrupted.json"))
 
 

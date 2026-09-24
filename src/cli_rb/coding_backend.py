@@ -7,16 +7,22 @@ from cli_rb.patches import PatchService
 
 
 class DockerCodingBackend(DockerReadBackend):
-    def __init__(self, snapshot, docker, image, approve=None):
+    def __init__(self, snapshot, docker, image, approve=None, *, review_writes=False):
         self.patches = PatchService(snapshot)
         self.approve = approve
+        self.review_writes = review_writes
         self.created_paths = set()
         super().__init__(snapshot, docker, image, writable=True)
 
     def _call(self, action, args, *, approved_write=False):
         with self._lock:
             direct = self.snapshot.mode == "direct"
-            if direct and action == "delete" and args["path"] not in self.created_paths:
+            needs_review = self.review_writes and (
+                action in {'create', 'edit', 'delete'} or (action == 'command' and not direct))
+            if needs_review:
+                if not self.approve or not self.approve(f"中断恢复后重新确认写操作（可能重复旧操作）：{action}\n{args}"):
+                    return '恢复后的写操作未获授权，没有执行。不要绕过此决定。'
+            if not needs_review and direct and action == "delete" and args["path"] not in self.created_paths:
                 if not self.approve or not self.approve(f"删除已有文件：{args['path']}"):
                     return "授权未获得，删除未执行。不要绕过此决定。"
             self._mount_writable = not (direct and action == "command" and not approved_write)

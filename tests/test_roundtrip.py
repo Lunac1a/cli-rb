@@ -1,36 +1,10 @@
-from typing import Any
-
 import pytest
-from langchain_core.language_models.chat_models import BaseChatModel
+from helpers import ScriptedModel, request
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import Field
 
 from cli_rb.agent import build_agent, stream_turn
 from cli_rb.demo import DEMO_QUESTION, DemoModel, demo_backend
 from cli_rb.workspace import FixtureBackend, make_read_tool
-
-
-class ScriptedModel(BaseChatModel):
-    replies: list[AIMessage]
-    seen: list[list] = Field(default_factory=list)
-
-    @property
-    def _llm_type(self):
-        return "test-script"
-
-    def bind_tools(self, tools, *, tool_choice=None, **kwargs: Any):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        self.seen.append(list(messages))
-        return ChatResult(generations=[ChatGeneration(message=self.replies[len(self.seen) - 1])])
-
-
-def request(path, call_id):
-    return AIMessage(content="", tool_calls=[{
-        "name": "read_file", "args": {"path": path}, "id": call_id, "type": "tool_call",
-    }])
 
 
 def test_real_framework_roundtrip():
