@@ -195,6 +195,11 @@ class SessionStore:
         next_config = {'configurable': {'thread_id': next_thread}}
         # Write state only. START seeds messages; END clears scheduled tasks without execution.
         await agent.graph.aupdate_state(next_config, {'messages': messages}, as_node=START)
+        if 'todos' in current.values:
+            # TodoListMiddleware omits todos from START's public input schema.
+            # Seed its internal channel without invoking or replaying a tool.
+            await agent.graph.aupdate_state(next_config, {'todos': current.values['todos']},
+                                            as_node='tools')
         await agent.graph.aupdate_state(next_config, None, as_node=END)
         ready = await agent.graph.aget_state(next_config)
         if ready.next or ready.tasks or len(ready.values.get('messages', [])) != len(messages):
@@ -231,7 +236,7 @@ class SessionStore:
         return history
 
     async def finish(self, agent):
-        from cli_rb.agent import has_reply
+        from cli_rb.runtime.agent import has_reply
         state = await agent.graph.aget_state(self.config)
         messages = state.values.get('messages', [])
         if state.next or state.tasks or not messages or not has_reply(messages[-1]):

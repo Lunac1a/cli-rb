@@ -6,8 +6,10 @@ pytest-cache-files-*/
 .idea/
 .env
 .env.*
+!.env.example
 dist/
 .cli-rb/
 
 # Local learning notes and project plans
 /docs/
+/AGENTS.md

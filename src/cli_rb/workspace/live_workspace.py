@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 import stat
 import subprocess
 
-from cli_rb.snapshot import SECRET, excluded
+from cli_rb.workspace.snapshot import SECRET, excluded
 
 
 def ignored_paths(root):

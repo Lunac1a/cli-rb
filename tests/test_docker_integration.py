@@ -8,9 +8,9 @@ from uuid import uuid4
 
 import pytest
 
-from cli_rb.coding_backend import DockerCodingBackend
-from cli_rb.docker_backend import DockerReadBackend, prepare_image
-from cli_rb.snapshot import create_snapshot
+from cli_rb.workspace.coding_backend import DockerCodingBackend
+from cli_rb.workspace.docker_backend import DockerReadBackend, prepare_image
+from cli_rb.workspace.snapshot import create_snapshot
 
 pytestmark = pytest.mark.skipif(
     os.getenv("CLI_RB_DOCKER_TESTS") != "1", reason="set CLI_RB_DOCKER_TESTS=1 for real Docker",
@@ -22,8 +22,8 @@ def test_cancel_before_start_never_writes_after_return(tmp_path, monkeypatch, pa
     from concurrent.futures import ThreadPoolExecutor
     import threading
 
-    from cli_rb import live_workspace
-    from cli_rb.snapshot import create_session
+    from cli_rb.workspace import live_workspace
+    from cli_rb.workspace.snapshot import create_session
 
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -50,7 +50,7 @@ def test_cancel_before_start_never_writes_after_return(tmp_path, monkeypatch, pa
         return original_run(args, **kwargs)
 
     monkeypatch.setattr(live_workspace, 'protected_paths', scan)
-    monkeypatch.setattr('cli_rb.docker_backend.subprocess.run', run)
+    monkeypatch.setattr('cli_rb.workspace.docker_backend.subprocess.run', run)
     with ThreadPoolExecutor(max_workers=2) as pool:
         work = pool.submit(backend.edit_file, 'a.txt', 'before', 'after')
         try:
@@ -86,10 +86,10 @@ def test_interrupted_command_continues_without_replay_after_review(tmp_path, mod
     from langchain_core.messages import AIMessage, HumanMessage
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    from cli_rb.agent import astream_turn, build_agent
-    from cli_rb.docker_backend import ensure_session_stopped
-    from cli_rb.persistence import SessionStore
-    from cli_rb.snapshot import create_session, load_snapshot
+    from cli_rb.runtime.agent import astream_turn, build_agent
+    from cli_rb.workspace.docker_backend import ensure_session_stopped
+    from cli_rb.runtime.persistence import SessionStore
+    from cli_rb.workspace.snapshot import create_session, load_snapshot
 
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -133,7 +133,8 @@ def test_interrupted_command_continues_without_replay_after_review(tmp_path, mod
         model = ScriptedModel(replies=[request('progress.txt', 'fresh-read'), AIMessage(content='', tool_calls=[{
             'name': 'create_file', 'args': {'path': 'done.txt', 'content': 'new authorized work'},
             'id': 'fresh-write', 'type': 'tool_call',
-        }]), AIMessage(content='已读取现状并完成新的写入，没有重跑旧命令')])
+        }]), AIMessage(content='已读取现状并完成新的写入，没有重跑旧命令'),
+            AIMessage(content='修改已保留，未运行验证；没有重跑旧命令。')])
         with SessionStore(snapshot.session, allow_interrupted=True) as store:
             async with AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite')) as saver:
                 agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
@@ -149,6 +150,8 @@ def test_interrupted_command_continues_without_replay_after_review(tmp_path, mod
                 async for _ in astream_turn(agent, [HumanMessage(content='读取现状，然后创建done.txt，不重跑旧命令')]):
                     pass
                 assert approvals and store.data['state'] == 'idle'
+                assert len(model.seen) == 4
+                assert '程序收尾核对' in model.seen[-1][-1].text
                 assert (loaded.workspace / 'progress.txt').read_text().strip() == 'once'
                 assert (loaded.workspace / 'done.txt').read_text() == 'new authorized work'
                 assert backend.patches.baseline.joinpath('a.txt').read_text() == 'baseline'
@@ -169,9 +172,9 @@ def test_resume_docker_edit_keeps_baseline_and_never_replays(tmp_path, mode):
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    from cli_rb.agent import astream_turn, build_agent
-    from cli_rb.persistence import SessionStore
-    from cli_rb.snapshot import create_session, load_snapshot
+    from cli_rb.runtime.agent import astream_turn, build_agent
+    from cli_rb.runtime.persistence import SessionStore
+    from cli_rb.workspace.snapshot import create_session, load_snapshot
 
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -187,13 +190,15 @@ def test_resume_docker_edit_keeps_baseline_and_never_replays(tmp_path, mode):
             request('a.txt', 'read'), AIMessage(content='', tool_calls=[{
                 'name': 'edit_file', 'args': {'path': 'a.txt', 'old_text': 'before', 'new_text': 'after'},
                 'id': 'edit', 'type': 'tool_call',
-            }]), AIMessage(content='已修改'),
+            }]), AIMessage(content='已修改'), AIMessage(content='修改已保留，尚未验证。'),
         ] if first else [AIMessage(content='已有修改保留')]))
         with SessionStore(snapshot.session, create=first, model_config={}) as store:
             async with AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite')) as saver:
                 agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
                 if not first:
-                    assert len(await store.history(agent)) == 6
+                    history = await store.history(agent)
+                    assert len(history) == 8
+                    assert '验证证据未通过核对' in history[-1].text
                 async for _ in astream_turn(agent, [HumanMessage(content='修改' if first else '说明上次结果')]):
                     pass
                 if not first:
@@ -212,7 +217,7 @@ def test_task_deadline_stops_command_and_preserves_written_file(tmp_path):
     from helpers import ScriptedModel
     from langchain_core.messages import AIMessage, HumanMessage
 
-    from cli_rb.agent import TaskTimeLimitExceeded, build_agent, stream_turn
+    from cli_rb.runtime.agent import TaskTimeLimitExceeded, build_agent, stream_turn
 
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -242,9 +247,9 @@ def test_deadline_while_waiting_for_permission_never_deletes(tmp_path):
     from helpers import ScriptedModel
     from langchain_core.messages import AIMessage, HumanMessage
 
-    from cli_rb.agent import TaskTimeLimitExceeded, build_agent
-    from cli_rb.cli import display_turn
-    from cli_rb.snapshot import create_session
+    from cli_rb.runtime.agent import TaskTimeLimitExceeded, build_agent
+    from cli_rb.interface.cli import display_turn
+    from cli_rb.workspace.snapshot import create_session
 
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -279,8 +284,8 @@ def test_tool_budget_preserves_prior_direct_edit_and_blocks_pending_batch(tmp_pa
     from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
     from langchain_core.messages import AIMessage, HumanMessage
 
-    from cli_rb.agent import build_agent, stream_turn
-    from cli_rb.snapshot import create_session
+    from cli_rb.runtime.agent import build_agent, stream_turn
+    from cli_rb.workspace.snapshot import create_session
 
     repo = tmp_path / 'direct'
     repo.mkdir()
@@ -382,7 +387,7 @@ def test_real_coding_edit_command_timeout_patch_and_boundary(tmp_path):
 
 
 def test_direct_workspace_edits_permissions_and_masks(tmp_path):
-    from cli_rb.snapshot import create_session
+    from cli_rb.workspace.snapshot import create_session
     repo = tmp_path / 'live'
     repo.mkdir()
     subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
@@ -430,8 +435,8 @@ def test_async_agent_cancellation_stops_command_before_next_model_call(tmp_path)
     from helpers import ScriptedModel
     from langchain_core.messages import AIMessage, HumanMessage
 
-    from cli_rb.agent import build_agent
-    from cli_rb.cli import display_turn
+    from cli_rb.runtime.agent import build_agent
+    from cli_rb.interface.cli import display_turn
 
     repo = tmp_path / 'repo'
     repo.mkdir()

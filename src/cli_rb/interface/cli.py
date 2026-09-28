@@ -7,6 +7,7 @@ import os
 import subprocess
 import sqlite3
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -16,20 +17,20 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from cli_rb.agent import (
+from cli_rb.runtime.agent import (
     build_agent, stream_turn, astream_turn, TextDelta, ContextUpdate, has_reply, TaskTimeLimitExceeded,
 )
-from cli_rb.approval import TerminalApproval
-from cli_rb.context import ContextLimitExceeded
+from cli_rb.interface.approval import TerminalApproval
+from cli_rb.runtime.context import ContextLimitExceeded
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from cli_rb.config import ModelConfig
-from cli_rb.demo import DEMO_QUESTION, DemoModel, demo_backend
-from cli_rb.doctor import inspect_environment
-from cli_rb.docker_backend import DockerReadBackend, prepare_image, ensure_session_stopped
-from cli_rb.snapshot import create_snapshot, create_session, load_snapshot
-from cli_rb.persistence import SessionStore, SessionNotReady, inspect_session, recovery_messages
-from cli_rb.coding_backend import DockerCodingBackend
+from cli_rb.interface.demo import DEMO_QUESTION, DemoModel, demo_backend
+from cli_rb.interface.doctor import inspect_environment
+from cli_rb.workspace.docker_backend import DockerReadBackend, prepare_image, ensure_session_stopped
+from cli_rb.workspace.snapshot import create_snapshot, create_session, load_snapshot
+from cli_rb.runtime.persistence import SessionStore, SessionNotReady, inspect_session, recovery_messages
+from cli_rb.workspace.coding_backend import DockerCodingBackend
 
 app = typer.Typer(invoke_without_command=True, help="CLI Rb：本地工作区编码助手。")
 console = Console()
@@ -61,7 +62,7 @@ def render(message, *, show_text=True):
 def report_empty_reply(messages, backend, evidence_start=0):
     if messages and has_reply(messages[-1]):
         return False
-    console.print("模型未返回最终文字答复；以下为程序记录，不代表模型已确认需求全部完成。")
+    console.print("模型未返回有效的最终文字答复；以下为程序记录，不代表模型已确认需求全部完成。")
     evidence = backend.command_evidence[evidence_start:]
     if evidence:
         for item in evidence:
@@ -160,7 +161,7 @@ def inspect_session_records(session: Path, changes: Annotated[bool, typer.Option
     try:
         console.print(inspect_session(session), markup=False, soft_wrap=True)
         if changes:
-            from cli_rb.patches import PatchService
+            from cli_rb.workspace.patches import PatchService
 
             snapshot = load_snapshot(session)
             console.print(f'比较工作区：{snapshot.workspace}（{snapshot.mode}）', markup=False)
@@ -177,7 +178,7 @@ def inspect_session_records(session: Path, changes: Annotated[bool, typer.Option
 def explain_session(session: Path, request: Annotated[str, typer.Option(
         help='原任务要求，仅用于核对旧记录，不作为新任务执行。')]):
     """用本地模型重新说明已有证据，不恢复旧任务或执行工具。"""
-    from cli_rb.session_explanation import explanation_evidence, explain_evidence
+    from cli_rb.interface.session_explanation import explanation_evidence, explain_evidence
 
     try:
         evidence = explanation_evidence(session, request)
@@ -297,7 +298,7 @@ def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | 
         else:
             config = ModelConfig.from_env()
             if not config.model:
-                config = ModelConfig(config.base_url, typer.prompt("本地模型 ID"))
+                config = replace(config, model=typer.prompt("模型 ID"))
             source = Path(typer.prompt("Git 仓库目录", default=str(Path.cwd()))).expanduser()
         console.print(f"工作区：{source}", markup=False)
         if isolated:

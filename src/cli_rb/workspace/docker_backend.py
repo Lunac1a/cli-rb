@@ -8,7 +8,7 @@ import subprocess
 import threading
 from uuid import uuid4
 
-from cli_rb.snapshot import Snapshot
+from cli_rb.workspace.snapshot import Snapshot
 
 IMAGE = "python:3.12-slim-bookworm"
 
@@ -117,7 +117,7 @@ class DockerReadBackend:
     def _execute_call(self, action, args):
         name = "cli-rb-" + uuid4().hex
         if self.snapshot.mode == "direct":
-            from cli_rb.live_workspace import protected_paths
+            from cli_rb.workspace.live_workspace import protected_paths
             self._protected = protected_paths(self.snapshot.workspace)
         request = json.dumps({"action": action, "args": args, "protected_paths": list(self._protected)}, ensure_ascii=False)
         journal = self.logs / f"{name}-action.json"
@@ -193,6 +193,12 @@ class DockerReadBackend:
 
     def list_files(self, path=".", offset=0, limit=50):
         return self._call("list", {"path": path, "offset": offset, "limit": limit})
+
+    def list_directory(self, path='.', offset=0, limit=50):
+        return self._call('directory', {'path': path, 'offset': offset, 'limit': limit})
+
+    def find_files(self, pattern, path='.', offset=0, limit=50):
+        return self._call('find', {'pattern': pattern, 'path': path, 'offset': offset, 'limit': limit})
 
     def search_files(self, query, path=".", offset=0, limit=50):
         return self._call("search", {"query": query, "path": path, "offset": offset, "limit": limit})

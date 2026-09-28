@@ -51,18 +51,18 @@ def load_snapshot(directory: Path) -> Snapshot:
     workspace = Path(manifest['source']) if mode == 'direct' else session / 'workspace'
     if not workspace.is_dir():
         raise ValueError('原工作区不存在，拒绝恢复。')
-    from cli_rb.patches import file_bytes
+    from cli_rb.workspace.patches import file_bytes
     baseline = session / ('workspace' if mode == 'direct' else 'baseline')
     for name, digest in manifest['files'].items():
         relative = PurePosixPath(name)
         if relative.is_absolute() or '..' in relative.parts or '\\' in name or ':' in name:
             raise ValueError('会话基线路径无效。')
-        if hashlib.sha256(file_bytes(baseline, name)).hexdigest() != digest:
+        if hashlib.sha256(file_bytes(baseline, name, manifest.get('max_file_bytes', 1024 * 1024))).hexdigest() != digest:
             raise ValueError('会话起点基线已改变，拒绝恢复。')
     return Snapshot(session, workspace.resolve(), manifest, mode, resumed=True)
 
 
-def create_snapshot(source: Path, sessions: Path) -> Snapshot:
+def create_snapshot(source: Path, sessions: Path, *, max_file_bytes=1024 * 1024) -> Snapshot:
     source = source.resolve(strict=True)
     if not source.is_dir():
         raise ValueError("请选择 Git 仓库目录。")
@@ -82,7 +82,8 @@ def create_snapshot(source: Path, sessions: Path) -> Snapshot:
     session = sessions.resolve() / uuid4().hex
     workspace = session / "workspace"
     workspace.mkdir(parents=True)
-    manifest = {"source": str(source), "files": {}, "excluded": {}, "status": "preparing"}
+    manifest = {"source": str(source), "files": {}, "excluded": {}, "status": "preparing",
+                "max_file_bytes": max_file_bytes, "mode": "isolated"}
     total = 0
     try:
         for name in entries:
@@ -111,9 +112,9 @@ def create_snapshot(source: Path, sessions: Path) -> Snapshot:
                 continue
             # No source execution. Read bounded bytes and write new independent files.
             with file.open("rb") as stream:
-                content = stream.read(1024 * 1024 + 1)
-            if len(content) > 1024 * 1024:
-                manifest["excluded"][name] = "larger than 1 MiB"
+                content = stream.read(max_file_bytes + 1)
+            if len(content) > max_file_bytes:
+                manifest["excluded"][name] = f"larger than {max_file_bytes} bytes"
                 continue
             if SECRET.search(content):
                 manifest["excluded"][name] = "recognized credential content"

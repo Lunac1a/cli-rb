@@ -3,9 +3,9 @@ import subprocess
 
 import pytest
 
-from cli_rb.container_worker import execute
-from cli_rb.docker_backend import DockerReadBackend
-from cli_rb.snapshot import Snapshot, create_snapshot
+from cli_rb.workspace.container_worker import execute
+from cli_rb.workspace.docker_backend import DockerReadBackend
+from cli_rb.workspace.snapshot import Snapshot, create_snapshot
 
 
 def git(root, *args):
@@ -63,7 +63,7 @@ def test_timeout_removes_only_its_container_without_retry(tmp_path, monkeypatch)
             raise subprocess.TimeoutExpired(args, 30)
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr("cli_rb.docker_backend.subprocess.run", run)
+    monkeypatch.setattr("cli_rb.workspace.docker_backend.subprocess.run", run)
     with pytest.raises(subprocess.TimeoutExpired):
         backend.read_file("app.py")
     assert len(calls) == 4
@@ -78,3 +78,23 @@ def test_binary_and_long_output_are_explicit(tmp_path):
         execute(tmp_path, {"action": "read", "args": {"path": "binary"}})
     (tmp_path / "long").write_text("a" * 3000)
     assert "截断" in execute(tmp_path, {"action": "read", "args": {"path": "long"}})
+
+
+def test_code_pages_are_contiguous_with_exact_next_line(tmp_path):
+    import re
+    lines = [f'line_{i} = ' + 'x' * 110 for i in range(200)]
+    (tmp_path / 'code.py').write_text('\n'.join(lines), encoding='utf-8')
+    collected, start = [], 1
+    while True:
+        page = execute(tmp_path, {'action': 'read', 'args': {
+            'path': 'code.py', 'start_line': start, 'max_lines': 200}})
+        assert len(page) < 6100
+        numbered = [line for line in page.splitlines() if re.match(r'^\d+: ', line)]
+        collected.extend(numbered)
+        next_line = re.search(r'从第 (\d+) 行继续读取', page)
+        if not next_line:
+            break
+        following = int(next_line[1])
+        assert following == start + len(numbered)
+        start = following
+    assert collected == [f'{i}: {line}' for i, line in enumerate(lines, 1)]

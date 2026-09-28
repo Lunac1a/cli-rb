@@ -1,6 +1,5 @@
 """Bounded, read-only checks; reachability is not a model acceptance test."""
 
-import os
 import platform
 import shutil
 import subprocess
@@ -9,7 +8,7 @@ from dataclasses import asdict, dataclass
 import httpx
 
 from cli_rb.config import ModelConfig
-from cli_rb.docker_backend import docker_executable
+from cli_rb.workspace.docker_backend import docker_executable
 
 
 @dataclass
@@ -48,7 +47,7 @@ def inspect_environment(config: ModelConfig) -> list[dict]:
     try:
         response = httpx.get(
             config.base_url.rstrip("/") + "/models", timeout=5, trust_env=False,
-            headers={"Authorization": f"Bearer {os.getenv('CLI_RB_API_KEY', 'lm-studio')}"},
+            headers={"Authorization": f"Bearer {config.api_key()}"},
         )
         response.raise_for_status()
         models = [item["id"] for item in response.json()["data"]]

@@ -2,8 +2,9 @@
 
 import re
 
-from cli_rb.docker_backend import DockerReadBackend
-from cli_rb.patches import PatchService
+from cli_rb.workspace.docker_backend import DockerReadBackend
+from cli_rb.workspace.patches import PatchService
+from cli_rb.quality.verification import VerificationLedger
 
 
 class DockerCodingBackend(DockerReadBackend):
@@ -13,6 +14,16 @@ class DockerCodingBackend(DockerReadBackend):
         self.review_writes = review_writes
         self.created_paths = set()
         super().__init__(snapshot, docker, image, writable=True)
+        self.verification = VerificationLedger(self)
+
+    def run_verification(self, command, scope, timeout_seconds=60, kind='test'):
+        return self.verification.run(command, scope, timeout_seconds, kind)
+
+    def review_work(self):
+        import json
+        with self._lock:
+            return json.dumps({**self.verification.assess(),
+                               **self.verification.review_changes()}, ensure_ascii=False)
 
     def _call(self, action, args, *, approved_write=False):
         with self._lock:

@@ -2,9 +2,9 @@ import pytest
 from helpers import ScriptedModel, request
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from cli_rb.agent import build_agent, stream_turn
-from cli_rb.demo import DEMO_QUESTION, DemoModel, demo_backend
-from cli_rb.workspace import FixtureBackend, make_read_tool
+from cli_rb.runtime.agent import build_agent, stream_turn, has_reply, reply_status
+from cli_rb.interface.demo import DEMO_QUESTION, DemoModel, demo_backend
+from cli_rb.workspace.tools import FixtureBackend, make_read_tool
 
 
 def test_real_framework_roundtrip():
@@ -88,3 +88,19 @@ def test_recovery_error_preserves_existing_evidence():
     assert any(isinstance(m, ToolMessage) for m in returned)
     assert returned[-1].response_metadata['final_reply_recovery'] == 'request_failed'
     assert returned[-1].response_metadata['error_type'] == 'IndexError'
+
+
+@pytest.mark.parametrize('recovery', [
+    AIMessage(content='<tool_call>\n<function=read_file>\n</function>\n</tool_call>'),
+    AIMessage(content='还没说完', response_metadata={'finish_reason': 'length'}),
+    AIMessage(content='未修改文件；以下是格式示例：\n```xml\n<tool_call>\n<function=read_file>\n</tool_call>\n```'),
+])
+def test_truncated_reply_recovery_distinguishes_tool_text_from_code_examples(recovery):
+    first = AIMessage(content='部分说明', response_metadata={'finish_reason': 'length'})
+    model = ScriptedModel(replies=[first, recovery])
+    returned = list(stream_turn(build_agent(model, demo_backend()), [HumanMessage(content='检查文件')]))
+    assert not has_reply(returned[0])
+    assert len(model.seen) == 2 and not any(isinstance(m, ToolMessage) for m in returned)
+    assert returned[-1].response_metadata['original_reply_status'] == 'output_truncated'
+    assert reply_status(returned[-1]) == reply_status(recovery)
+    assert has_reply(returned[-1]) == ('```xml' in recovery.text)

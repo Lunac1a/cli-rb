@@ -6,7 +6,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from cli_rb.workspace import FixtureBackend
+from cli_rb.workspace.tools import FixtureBackend
 
 DEMO_QUESTION = "请读取 README.md，告诉我项目名称和当前能力。"
 

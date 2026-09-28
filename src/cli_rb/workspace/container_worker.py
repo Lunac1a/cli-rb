@@ -1,12 +1,40 @@
 """Standalone stdlib worker, executed only by Python inside the container."""
 
 import json
+import fnmatch
+import ast
 import os
 from pathlib import Path, PurePosixPath
 import signal
 import subprocess
 import sys
 import tempfile
+
+
+def python_edit_warnings(name, before, after):
+    """Advisory diagnostics, never reject intentional refactors or run source code."""
+    if not name.endswith('.py'):
+        return []
+    try:
+        new = ast.parse(after) if after is not None else None
+    except (SyntaxError, ValueError):
+        return [f'{name}：修改后的Python语法无法解析。']
+    if before is None or 'test' not in name.lower():
+        return []
+    try:
+        old = ast.parse(before)
+    except (SyntaxError, ValueError):
+        return []
+    def names(tree, prefix=''):
+        result = set()
+        for node in getattr(tree, 'body', []):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                key = prefix + node.name
+                result.add(key)
+                result.update(names(node, key + '.'))
+        return result
+    removed = names(old) - names(new)
+    return [f'{name}：原测试定义消失或改变归属：{", ".join(sorted(removed))}。检查是否有意，不自动判错。'] if removed else []
 
 
 def text_file(path):
@@ -35,9 +63,9 @@ def execute_command(root, args):
 
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(
-            ["/bin/sh", "-c", command], cwd=cwd, stdin=subprocess.DEVNULL,
+            ["/bin/bash", "-o", "pipefail", "-c", command], cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=output, stderr=subprocess.STDOUT, start_new_session=True, preexec_fn=limits,
-            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/tmp",
+            env={"PATH": os.environ.get("CLI_RB_COMMAND_PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": "/tmp",
                  "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"},
         )
         timed_out = False
@@ -55,7 +83,8 @@ def execute_command(root, args):
         output.seek(0)
         captured = output.read().decode("utf-8", errors="replace")
     return json.dumps({"exit_code": process.returncode, "timed_out": timed_out,
-                       "output": captured, "output_limit_bytes": 8 * 1024 * 1024}, ensure_ascii=False)
+                       "output": captured, "output_limit_bytes": 8 * 1024 * 1024,
+                       "shell": "bash", "pipefail": True}, ensure_ascii=False)
 
 
 def resolve(root, value):
@@ -99,11 +128,13 @@ def execute(root, request, *, writable=False):
             path.unlink()
             return "已删除工作区文件。"
         if action == "create":
+            before = None
             content = args["content"]
             if path.exists():
                 raise ValueError("文件已存在，请使用 edit_file。")
         else:
             content = text_file(path)
+            before = content
             old = args["old_text"]
             new = args["new_text"]
             if old and content.count(old) == 0 and "\r\n" in content:
@@ -126,28 +157,63 @@ def execute(root, request, *, writable=False):
                 temporary = Path(stream.name)
             temporary.chmod(path.stat().st_mode & 0o777)
             temporary.replace(path)
-        return "已更新工作区文件；尚未验证。"
+        warnings = python_edit_warnings(relative, before, content)
+        return "已更新工作区文件；尚未验证。" + ('\n' + '\n'.join(warnings) if warnings else '')
     if action == "read":
         start = integer(args.get("start_line", 1), 1, 1000000)
         count = integer(args.get("max_lines", 80), 1, 200)
         lines = text_file(path).splitlines()
-        end = min(start - 1 + count, len(lines))
-        result = "\n".join(
-            f"{i}: {line[:2000]}" + (" [该行超过 2000 字符，已截断]" if len(line) > 2000 else "")
-            for i, line in enumerate(lines[start - 1:end], start)
-        )
+        end = start - 1
+        page, size = [], 0
+        for i, line in enumerate(lines[start - 1:start - 1 + count], start):
+            row = f"{i}: {line[:2000]}" + (" [该行超过 2000 字符，已截断]" if len(line) > 2000 else "")
+            if page and size + len(row) + 1 > 6000:
+                break
+            page.append(row)
+            size += len(row) + 1
+            end = i
+        result = '\n'.join(page)
         if end < len(lines):
             result += f"\n[更多内容：从第 {end + 1} 行继续读取]"
         return result or "[文件为空或已到末尾]"
-    if not path.is_dir():
-        raise NotADirectoryError("目录不存在。")
-    files = sorted(p for p in path.rglob("*") if p.is_file() and not p.is_symlink()
+    if action == 'directory':
+        if not path.is_dir():
+            raise NotADirectoryError('目录不存在。')
+        offset = integer(args.get('offset', 0), 0, 1000000)
+        limit = integer(args.get('limit', 50), 1, 100)
+        entries = [p for p in sorted(path.iterdir()) if not p.is_symlink()
                    and not any(p.relative_to(root).as_posix() == blocked or
-                               p.relative_to(root).as_posix().startswith(blocked + "/") for blocked in protected))
+                               p.relative_to(root).as_posix().startswith(blocked + '/') for blocked in protected)]
+        rows = [p.relative_to(root).as_posix() + ('/' if p.is_dir() else '') for p in entries]
+        result = '\n'.join(rows[offset:offset + limit]) or '[没有结果]'
+        return result + (f'\n[更多结果：offset={offset + limit}]' if len(rows) > offset + limit else '')
+    if action == 'search' and path.is_file():
+        files = [path]
+    elif not path.is_dir():
+        raise NotADirectoryError("目录不存在。")
+    else:
+        def walk_files():
+            for directory, dirs, names in os.walk(path, followlinks=False):
+                def allowed(p):
+                    relative = p.relative_to(root).as_posix()
+                    return not p.is_symlink() and not any(relative == b or relative.startswith(b + '/') for b in protected)
+                dirs[:] = sorted(d for d in dirs if allowed(Path(directory) / d))
+                for name in sorted(names):
+                    p = Path(directory) / name
+                    if allowed(p) and p.is_file():
+                        yield p
+        files = walk_files()
     offset = integer(args.get("offset", 0), 0, 1000000)
     limit = integer(args.get("limit", 50), 1, 100)
-    if action == "list":
-        rows = [p.relative_to(root).as_posix() for p in files]
+    if action in {'list', 'find'}:
+        rows = []
+        pattern = args.get('pattern', '*')
+        for p in files:
+            relative = p.relative_to(root).as_posix()
+            if action == 'list' or fnmatch.fnmatchcase(relative, pattern):
+                rows.append(relative)
+                if len(rows) > offset + limit:
+                    break
     elif action == "search":
         query = args["query"]
         if not isinstance(query, str) or not 1 <= len(query) <= 200:

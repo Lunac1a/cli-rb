@@ -7,10 +7,10 @@ from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededE
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from cli_rb.agent import build_agent, stream_turn
-from cli_rb.cli import chat_loop
-from cli_rb.demo import demo_backend
-from cli_rb.workspace import FixtureBackend
+from cli_rb.runtime.agent import build_agent, stream_turn
+from cli_rb.interface.cli import chat_loop
+from cli_rb.interface.demo import demo_backend
+from cli_rb.workspace.tools import FixtureBackend
 
 
 def test_loop_stops_before_next_model_call_and_does_not_recover():
@@ -19,7 +19,7 @@ def test_loop_stops_before_next_model_call_and_does_not_recover():
     received = []
 
     async def run():
-        from cli_rb.agent import astream_turn
+        from cli_rb.runtime.agent import astream_turn
         async for event in astream_turn(build_agent(model, demo_backend(), model_call_limit=limit),
                                        [HumanMessage(content='读取')]):
             received.append(event)

@@ -10,18 +10,18 @@ from helpers import ScriptedModel, StreamingModel, request
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from cli_rb.agent import TaskTimeLimitExceeded, astream_turn, build_agent
-from cli_rb.demo import demo_backend
-from cli_rb.persistence import SessionNotReady, SessionStore
+from cli_rb.runtime.agent import TaskTimeLimitExceeded, astream_turn, build_agent
+from cli_rb.interface.demo import demo_backend
+from cli_rb.runtime.persistence import SessionNotReady, SessionStore
 
 
 @pytest.mark.parametrize('tool_request', [False, True])
 def test_separate_explanation_never_binds_tools_or_changes_session(tmp_path, monkeypatch, tool_request):
     from typer.testing import CliRunner
 
-    from cli_rb.cli import app
+    from cli_rb.interface.cli import app
     from cli_rb.config import ModelConfig
-    from cli_rb.snapshot import create_session
+    from cli_rb.workspace.snapshot import create_session
 
     class UnboundModel(ScriptedModel):
         def bind_tools(self, *args, **kwargs):
@@ -62,7 +62,7 @@ def test_separate_explanation_never_binds_tools_or_changes_session(tmp_path, mon
 def test_inspection_reports_uncertainty_without_changing_records(tmp_path):
     from typer.testing import CliRunner
 
-    from cli_rb.cli import app
+    from cli_rb.interface.cli import app
 
     (tmp_path / 'conversation.json').write_text('{"state": "blocked"}')
     logs = tmp_path / 'tool-logs'
@@ -85,7 +85,7 @@ def test_inspection_reports_uncertainty_without_changing_records(tmp_path):
 
 
 def test_inspection_treats_damaged_or_missing_evidence_as_unknown(tmp_path):
-    from cli_rb.persistence import inspect_session
+    from cli_rb.runtime.persistence import inspect_session
 
     (tmp_path / 'conversation.json').write_text('{"state": []}')
     logs = tmp_path / 'tool-logs'
@@ -197,9 +197,9 @@ def test_process_crash_releases_lock_but_running_session_stays_blocked(tmp_path)
 import asyncio, os, sys
 from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from cli_rb.persistence import SessionStore
-from cli_rb.agent import build_agent
-from cli_rb.demo import DemoModel, demo_backend
+from cli_rb.runtime.persistence import SessionStore
+from cli_rb.runtime.agent import build_agent
+from cli_rb.interface.demo import DemoModel, demo_backend
 async def main():
     path = Path(sys.argv[1])
     with SessionStore(path, create=True, model_config={}) as store:
@@ -216,7 +216,7 @@ asyncio.run(main())
 
 
 def test_modified_baseline_rejected(tmp_path):
-    from cli_rb.snapshot import create_session, load_snapshot
+    from cli_rb.workspace.snapshot import create_session, load_snapshot
     repo = tmp_path / 'repo'
     repo.mkdir()
     subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
@@ -296,7 +296,7 @@ def test_recovery_failed_commit_or_changed_evidence_never_switches_active_state(
 def test_cli_requires_confirmation_before_recovering_pending_work(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from cli_rb import cli
+    from cli_rb.interface import cli
 
     monkeypatch.setattr(cli, 'ensure_session_stopped', lambda *args: None)
     model = ScriptedModel(replies=[request('README.md', 'pending')])

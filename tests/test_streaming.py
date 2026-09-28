@@ -7,9 +7,9 @@ from helpers import ScriptedModel, StreamingModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rich.console import Console
 
-from cli_rb.agent import TextDelta, astream_turn, build_agent
-from cli_rb.cli import display_turn
-from cli_rb.demo import demo_backend
+from cli_rb.runtime.agent import TextDelta, astream_turn, build_agent
+from cli_rb.interface.cli import display_turn
+from cli_rb.interface.demo import demo_backend
 
 
 def test_deltas_arrive_before_completion_and_do_not_enter_history():
@@ -51,7 +51,7 @@ def test_fragmented_tool_arguments_only_execute_as_complete_call():
 
 def test_render_stream_once_and_hide_reasoning(monkeypatch):
     output = StringIO()
-    monkeypatch.setattr("cli_rb.cli.console", Console(file=output, width=120))
+    monkeypatch.setattr("cli_rb.interface.cli.console", Console(file=output, width=120))
     model = StreamingModel(replies=[])
     history, completed = [HumanMessage(content="你好")], []
     asyncio.run(display_turn(build_agent(model, demo_backend()), history,

@@ -38,7 +38,7 @@ class FixtureBackend:
 def make_read_tool(backend: ReadBackend):
     @tool
     def read_file(path: str, start_line: int = 1, max_lines: int = 80) -> str:
-        """Read numbered lines of a workspace file using a relative POSIX path."""
+        """Read a workspace-relative file path (e.g. src/app.py, never /workspace/src/app.py). start_line >= 1, max_lines 1-200. Large pages stop early; follow the returned next line."""
         try:
             return backend.read_file(path, start_line, max_lines)
         except (ValueError, FileNotFoundError) as error:
@@ -51,8 +51,23 @@ def make_read_tool(backend: ReadBackend):
 
 def make_workspace_tools(backend):
     @tool
+    def list_directory(path: str = '.', offset: int = 0, limit: int = 50) -> str:
+        """List one directory level without walking the repository. Directories end in /. Start here for repository navigation."""
+        try:
+            return backend.list_directory(path, offset, limit)
+        except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            return f'工具错误：{type(error).__name__}: {error}'
+
+    @tool
+    def find_files(pattern: str, path: str = '.', offset: int = 0, limit: int = 50) -> str:
+        """Find workspace-relative file paths with glob syntax (e.g. '*test*parser*.py'), without reading file contents. Paginate with offset."""
+        try:
+            return backend.find_files(pattern, path, offset, limit)
+        except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            return f'工具错误：{type(error).__name__}: {error}'
+    @tool
     def list_files(path: str = ".", offset: int = 0, limit: int = 50) -> str:
-        """List files recursively under a workspace directory; paginate with offset and limit."""
+        """List files under a relative directory, e.g. '.' or 'src', never an absolute path. Paginate with offset and limit."""
         try:
             return backend.list_files(path, offset, limit)
         except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -60,13 +75,14 @@ def make_workspace_tools(backend):
 
     @tool
     def search_files(query: str, path: str = ".", offset: int = 0, limit: int = 50) -> str:
-        """Search a literal text substring in UTF-8 workspace files; return paths and line numbers."""
+        """Search a literal substring, NOT regex. path must be a workspace-relative DIRECTORY ('.' or 'src'), not a file or absolute path. Returns file paths and line numbers."""
         try:
             return backend.search_files(query, path, offset, limit)
         except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             return f"工具错误：{type(error).__name__}"
 
-    return [make_read_tool(backend), list_files, search_files]
+    return [make_read_tool(backend), list_files, search_files,
+            *([list_directory, find_files] if hasattr(backend, 'list_directory') else [])]
 
 
 def make_coding_tools(backend):
@@ -78,27 +94,27 @@ def make_coding_tools(backend):
 
     @tool
     def create_file(path: str, content: str) -> str:
-        """Create a new UTF-8 file in the workspace; refuses to overwrite an existing file."""
+        """Create a new UTF-8 file using a workspace-relative path (e.g. test_bug.py). No absolute paths; refuses to overwrite an existing file."""
         return guarded(backend.create_file, path, content)
 
     @tool
     def edit_file(path: str, old_text: str, new_text: str) -> str:
-        """Replace exactly one occurrence of nonempty old_text. Read first; include enough context."""
+        """Edit a workspace-relative file path. Replace exactly one occurrence of nonempty old_text. Read first; include enough context."""
         return guarded(backend.edit_file, path, old_text, new_text)
 
     @tool
     def delete_file(path: str, expected_content: str) -> str:
-        """Delete a workspace file only when its full content matches expected_content from a prior read."""
+        """Delete a workspace-relative file only when its full content matches expected_content from a prior read."""
         return guarded(backend.delete_file, path, expected_content)
 
     @tool
     def run_command(command: str, timeout_seconds: int = 60) -> str:
-        """Run Linux shell command inside the offline container at /workspace. In direct mode the workspace is read-only; use run_write_command if writes are necessary. Returns exit_code, timed_out, output. Python stdlib available; missing dependencies must be reported, never install on host."""
+        """Run Bash with pipefail in the offline container at /workspace; timeout_seconds 1-60. In direct mode workspace is read-only; use run_write_command for writes. Returns exit_code, timed_out, output. Nonzero includes pipeline failures; zero is NOT proof tests passed (check output and collected tests). Use read_tool_log instead of head/tail. Never install on host."""
         return guarded(backend.run_command, command, timeout_seconds)
 
     @tool
     def run_write_command(command: str, timeout_seconds: int = 60) -> str:
-        """Request approval for an exact command with writable workspace access. Denial must be respected; do not bypass it."""
+        """Run Bash with pipefail and writable workspace access; timeout_seconds 1-60. Requests approval in direct mode. Denial must be respected. Check both exit_code and output; zero alone does not prove tests passed."""
         return guarded(backend.run_write_command, command, timeout_seconds)
 
     @tool
@@ -116,5 +132,16 @@ def make_coding_tools(backend):
         """Read saved output after truncation using the provided log ID and character offset."""
         return guarded(backend.read_tool_log, log_id, offset, max_chars)
 
+    @tool
+    def run_verification(command: str, scope: str, timeout_seconds: int = 60, kind: str = 'test') -> str:
+        """Execute validation once in the same offline sandbox and persist full output linked to code fingerprints. scope describes behaviors checked, not a coverage guarantee. kind=test recognizes pytest/unittest summaries; unknown output is NOT passing. kind=check records only command success for lint/build/assertion scripts, NOT test success. Use read_tool_log with returned log_id for full output. Same permissions/time limits as run_command; no approval bypass."""
+        return guarded(backend.run_verification, command, scope, timeout_seconds, kind)
+
+    @tool
+    def review_work() -> str:
+        """Inspect changed paths, Python syntax/test-definition risks, and stale/failed/missing verification evidence. Read-only: never runs tests or approves semantic correctness. Legitimate test renames may produce review warnings."""
+        return guarded(backend.review_work)
+
     return make_workspace_tools(backend) + [create_file, edit_file, delete_file, run_command,
-                                          run_write_command, show_changes, export_patch, read_tool_log]
+                                          run_write_command, show_changes, export_patch, read_tool_log,
+                                          *([run_verification, review_work] if hasattr(backend, 'verification') else [])]

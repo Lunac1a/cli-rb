@@ -8,10 +8,10 @@ from pathlib import Path, PurePosixPath
 import stat
 from uuid import uuid4
 
-from cli_rb.snapshot import SECRET, Snapshot, excluded
+from cli_rb.workspace.snapshot import SECRET, Snapshot, excluded
 
 
-def file_bytes(root: Path, name: str) -> bytes:
+def file_bytes(root: Path, name: str, max_file_bytes=1024 * 1024) -> bytes:
     current = root
     for part in PurePosixPath(name).parts:
         current /= part
@@ -21,13 +21,13 @@ def file_bytes(root: Path, name: str) -> bytes:
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("补丁仅支持普通文件。")
     with current.open("rb") as stream:
-        content = stream.read(1024 * 1024 + 1)
-    if len(content) > 1024 * 1024:
-        raise ValueError(f"文件超过 1 MiB，无法导出：{name}")
+        content = stream.read(max_file_bytes + 1)
+    if len(content) > max_file_bytes:
+        raise ValueError(f"文件超过 {max_file_bytes} 字节，无法导出：{name}")
     return content
 
 
-def inventory(root: Path, ignored=()):
+def inventory(root: Path, ignored=(), *, max_file_bytes=1024 * 1024):
     files = {}
     total = 0
     for directory, dirs, names in os.walk(root, followlinks=False):
@@ -45,7 +45,7 @@ def inventory(root: Path, ignored=()):
                 raise ValueError(f"发现链接，拒绝导出：{relative}")
             if name in dirs:
                 continue
-            data = file_bytes(root, relative)
+            data = file_bytes(root, relative, max_file_bytes)
             total += len(data)
             if len(files) >= 10000 or total > 64 * 1024 * 1024:
                 raise ValueError("副本超过补丁大小限制。")
@@ -91,6 +91,7 @@ def text_patch(before, after):
 class PatchService:
     def __init__(self, snapshot: Snapshot):
         self.snapshot = snapshot
+        self.max_file_bytes = snapshot.manifest.get('max_file_bytes', 1024 * 1024)
         self.last_export = None
         if snapshot.mode == "direct":
             self.baseline = snapshot.session / "workspace"
@@ -100,7 +101,7 @@ class PatchService:
             return  # load_snapshot already verified the original baseline hashes.
         self.baseline.mkdir(exist_ok=False)
         for name, digest in snapshot.manifest["files"].items():
-            content = file_bytes(snapshot.workspace, name)
+            content = file_bytes(snapshot.workspace, name, self.max_file_bytes)
             if hashlib.sha256(content).hexdigest() != digest:
                 raise ValueError("副本在准备基线前发生变化。")
             target = self.baseline / name
@@ -108,12 +109,12 @@ class PatchService:
             target.write_bytes(content)
 
     def diff(self):
-        before = {name: file_bytes(self.baseline, name) for name in self.snapshot.manifest["files"]}
+        before = {name: file_bytes(self.baseline, name, self.max_file_bytes) for name in self.snapshot.manifest["files"]}
         ignored = set(self.snapshot.manifest["excluded"])
         if self.snapshot.mode == "direct":
-            from cli_rb.live_workspace import ignored_paths
+            from cli_rb.workspace.live_workspace import ignored_paths
             ignored |= ignored_paths(self.snapshot.workspace) - before.keys()
-        return text_patch(before, inventory(self.snapshot.workspace, ignored))
+        return text_patch(before, inventory(self.snapshot.workspace, ignored, max_file_bytes=self.max_file_bytes))
 
     def export(self):
         patch = self.diff()

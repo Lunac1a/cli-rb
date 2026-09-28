@@ -6,15 +6,15 @@ from helpers import ScriptedModel, StreamingModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from typer.testing import CliRunner
 
-from cli_rb.agent import AgentRuntime, TaskTimeLimitExceeded, astream_turn, build_agent, stream_turn
-from cli_rb.cli import app, display_turn
-from cli_rb.demo import demo_backend
+from cli_rb.runtime.agent import AgentRuntime, TaskTimeLimitExceeded, astream_turn, build_agent, stream_turn
+from cli_rb.interface.cli import app, display_turn
+from cli_rb.interface.demo import demo_backend
 
 
 def test_default_and_hour_option(monkeypatch):
     assert build_agent(ScriptedModel(replies=[]), demo_backend()).task_timeout_seconds == 1800
     seen = []
-    monkeypatch.setattr('cli_rb.cli.chat', lambda **kwargs: seen.append(kwargs))
+    monkeypatch.setattr('cli_rb.interface.cli.chat', lambda **kwargs: seen.append(kwargs))
     assert CliRunner().invoke(app, ['--task-minutes', '60']).exit_code == 0
     assert seen == [{'isolated': False, 'task_minutes': 60, 'resume': None}]
     assert CliRunner().invoke(app, ['--task-minutes', '0']).exit_code == 2
@@ -121,7 +121,7 @@ def test_new_turn_gets_fresh_deadline():
 
 
 def test_pending_approval_is_closed_without_authorizing():
-    from cli_rb.approval import TerminalApproval
+    from cli_rb.interface.approval import TerminalApproval
 
     async def run():
         entered, closed = asyncio.Event(), asyncio.Event()
