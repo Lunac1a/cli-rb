@@ -33,10 +33,15 @@ uv run cli-rb
 | `CLI_RB_USE_RESPONSES_API` | `1`启用Responses，默认`0` |
 | `CLI_RB_REASONING_EFFORT` | 服务支持时设置，例如`medium` |
 | `CLI_RB_CONTEXT_WINDOW` | 本地工作窗口，默认`200000`；需匹配模型能力 |
+| `CLI_RB_CONTEXT_STRATEGY` | 默认`summary`；`codex_v2`为需单独验证服务兼容性的实验选项 |
 | `CLI_RB_MAX_OUTPUT_TOKENS` | 默认`32768`，同时用于上下文预留 |
 | `CLI_RB_REQUEST_TIMEOUT_SECONDS` | 请求等待和流式静默超时，默认`120`秒 |
 
 Responses模式使用`store=false`，保留工具往返需要的加密推理内容，发送当前工作历史，不依赖服务端`previous_response_id`。上下文使用启发式估算，另留输出预算和计数余量。服务商可能不执行客户端输出限制，调用次数与任务时限仍由Harness管理。
+
+`CLI_RB_CONTEXT_STRATEGY`默认为`summary`，由Harness维护可读的工作交接摘要，包含目标、决策、实际动作与证据、未完成项、下一步及历史消息引用。摘要正文最多约2048估算tokens；整理后目标为可用输入预算的20%，统一计算系统提示、工具、用户要求、摘要和近期历史。必须保留的用户要求或最新工具配对较大时，目标会明确上调，仍不得超过输入上限。压缩占用一次已有模型调用，失败保留原历史，没有固定15%的压缩承诺。
+
+会话模式提供`read_history`：按关键词搜索已归档的可见消息，再按消息ID分页读取原文。归档在自有摘要压缩前写入会话内的`context-history.sqlite`，不包含尚未归档的当前消息，也不会自动导入旧会话的全部检查点；摘要、旧工具记录都不是新的授权或当前验证证据。原生`codex_v2`作为实验选项保留，使用Responses流中的`compaction_trigger`。它依赖服务商对该协议的支持和框架内部请求转换，不保证兼容所有Responses服务；需单独验证后显式选用，不是自有摘要失败时的自动回退。
 
 `doctor`只检查环境；`demo`使用脚本模型和内存文件，不调用真实服务。`smoke`会请求真实模型验证工具往返，可能产生费用；它不代表编码任务验收。
 

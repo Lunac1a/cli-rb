@@ -76,6 +76,9 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
         prompt = coding_prompt(mode=backend.snapshot.mode, model_call_limit=model_call_limit,
                                tool_call_limit=tool_call_limit,
                                task_timeout_seconds=task_timeout_seconds)
+    if session is not None:
+        from cli_rb.runtime.history import make_history_tool
+        tools.append(make_history_tool(session))
     planning = PlanningMiddleware(getattr(backend, 'verification', None)) if coding else None
     completion = CompletionMiddleware(backend, model_call_limit) if coding and hasattr(backend, 'verification') else None
     context = None
