@@ -21,12 +21,12 @@ def test_coding_prompt_reaches_model_and_empty_reply_recovery_with_actual_limits
         # Framework planning appends a separate block; base instructions remain intact.
         assert prompt.startswith(agent.prompt)
         assert '{{' not in prompt
-        assert '7次模型调用、13次工具调用、90秒' in prompt
+        assert '7 model calls, 13 tool calls, and 90 seconds' in prompt
         if mode == 'direct':
-            assert '当前为直接模式' in prompt
-            assert 'run_command 对工作区只读' in prompt
-            assert '原仓库不挂载' not in prompt
+            assert 'Direct mode:' in prompt
+            assert 'run_command is read-only for the workspace' in prompt
+            assert 'The original repository is not mounted' not in prompt
         else:
-            assert '当前为隔离模式' in prompt
-            assert '原仓库不挂载' in prompt
-            assert '普通编辑立即生效' not in prompt
+            assert 'Isolated mode:' in prompt
+            assert 'The original repository is not mounted' in prompt
+            assert 'ordinary edits take effect immediately' not in prompt

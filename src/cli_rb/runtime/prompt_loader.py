@@ -13,22 +13,22 @@ def coding_prompt(*, mode='isolated', model_call_limit=50, tool_call_limit=100,
         raise ValueError('Unknown workspace mode')
     direct = mode == 'direct'
     workspace_rules = (
-        '当前为直接模式：工具操作真实本地仓库，普通编辑立即生效。'
-        'run_command 对工作区只读，需要写入的命令使用 run_write_command 申请授权；'
-        '删除已有文件也需授权。不得绕过拒绝或访问被屏蔽的Git元数据、凭据；不能推送或发布。'
+        'Direct mode: tools operate on the real local repository; ordinary edits take effect immediately. '
+        'run_command is read-only for the workspace; use run_write_command to request authorization for commands that write. '
+        'Deleting existing files also requires authorization. Do not bypass denials or access blocked Git metadata or credentials. Do not push or publish.'
         if direct else
-        '当前为隔离模式：读取和写入工具操作仓库副本，原仓库不挂载，修改不会自动应用到原仓库。'
-        '只能在授权的副本范围内操作，不能推送或发布。'
+        'Isolated mode: read/write tools operate on a repository copy. The original repository is not mounted, and changes are not automatically applied to it. '
+        'Operate only within the authorized copy. Do not push or publish.'
     )
     patch_rules = (
-        'show_changes / export_patch 相对会话起点展示或导出补丁；'
-        + ('修改已经在本地仓库生效，导出仅作可选归档。' if direct else '导出不会自动应用补丁。')
+        'show_changes / export_patch display or export a patch relative to the session baseline. '
+        + ('Changes already affect the local repository; export is optional archival.' if direct else 'Export does not automatically apply the patch.')
     )
     budget_rules = (
-        f'本轮上限为{model_call_limit}次模型调用、{tool_call_limit}次工具调用、'
-        f'{task_timeout_seconds:g}秒，维护和补全也可能消耗预算。这些是上限，不是要用满的目标；'
-        '此处不是实时剩余额度。不要假设还可以无限调用，给最终说明留出空间。'
-        '程序硬限制不会因为尚未完成而自动延长。'
+        f'This run allows at most {model_call_limit} model calls, {tool_call_limit} tool calls, '
+        f'and {task_timeout_seconds:g} seconds; maintenance and final-answer recovery may also consume budget. These are ceilings, not targets. '
+        'These numbers are not live remaining allowances. Do not assume unlimited calls; leave room for the final report. '
+        'Hard limits do not automatically increase when work remains unfinished.'
     )
     text = files('cli_rb').joinpath('prompts', 'coding.md').read_text(encoding='utf-8')
     for name, value in {'workspace_rules': workspace_rules, 'patch_rules': patch_rules,

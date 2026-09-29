@@ -133,9 +133,22 @@ def make_coding_tools(backend):
         return guarded(backend.read_tool_log, log_id, offset, max_chars)
 
     @tool
-    def run_verification(command: str, scope: str, timeout_seconds: int = 60, kind: str = 'test') -> str:
-        """Execute validation once in the same offline sandbox and persist full output linked to code fingerprints. scope describes behaviors checked, not a coverage guarantee. kind=test recognizes pytest/unittest summaries; unknown output is NOT passing. kind=check records only command success for lint/build/assertion scripts, NOT test success. Use read_tool_log with returned log_id for full output. Same permissions/time limits as run_command; no approval bypass."""
-        return guarded(backend.run_verification, command, scope, timeout_seconds, kind)
+    def run_verification(command: str, scope: str, timeout_seconds: int = 60, kind: str = 'test',
+                         behavior_ids: list[str] | None = None, assertion: str = '',
+                         purpose: str = 'verify', expected_failure: str = '') -> str:
+        """Execute once with code-version evidence. Optionally link registered IDs via behavior_ids for whole-run coverage; prefer bind_verification after execution for specific nodes and describe the actual checked assertion, not just a test command. purpose=verify/regression checks current behavior; reproduce requires expected_failure text specified before execution and records a pre-fix failure. A later successful check of the same declared behavior links the reproduction without erasing history. Simple pytest commands automatically produce JUnit XML in container /tmp, preserving test selection and logs; complex commands fall back to text, unknown is NOT passing. kind=check records command success only for assertion scripts/build/lint. Read-only workspace and approval rules are unchanged. Reports cannot prove semantic coverage; inspect assertions before claiming a behavior is checked."""
+        return guarded(backend.run_verification, command, scope, timeout_seconds, kind,
+                       behavior_ids, assertion, purpose, expected_failure)
+
+    @tool
+    def register_behavior(behavior_id: str, expected: str, assertion: str, affected_paths: list[str]) -> str:
+        """Register or revise ONE observable product behavior, independently of write_todos. expected is the observable result; assertion distinguishes correct from incorrect; affected_paths are investigated code paths (may initially be empty). Do not register investigation/edit/test-running steps. Call only for new or genuinely changed requirements, not progress. Revising a definition invalidates old bindings; existing current test evidence can be rebound if its actual assertions still establish the revised behavior."""
+        return guarded(backend.verification.register_behavior, behavior_id, expected, assertion, affected_paths)
+
+    @tool
+    def bind_verification(behavior_id: str, evidence_id: str, test_nodes: list[str], assertion: str) -> str:
+        """Bind existing run_verification evidence WITHOUT rerunning. Copy exact relevant node IDs from the returned test_evidence.nodes, including parameter cases needed for this behavior; assertion explains their actual checks. Only selected nodes must pass; unrelated skipped nodes do not invalidate this behavior. Failed tests elsewhere remain reported. For kind=check use test_nodes=[]; this proves command success only. Never guess nodes or narrow the selection to hide a failure relevant to the behavior."""
+        return guarded(backend.verification.bind_verification, behavior_id, evidence_id, test_nodes, assertion)
 
     @tool
     def review_work() -> str:
@@ -144,4 +157,4 @@ def make_coding_tools(backend):
 
     return make_workspace_tools(backend) + [create_file, edit_file, delete_file, run_command,
                                           run_write_command, show_changes, export_patch, read_tool_log,
-                                          *([run_verification, review_work] if hasattr(backend, 'verification') else [])]
+                                          *([register_behavior, run_verification, bind_verification, review_work] if hasattr(backend, 'verification') else [])]

@@ -16,14 +16,21 @@ class DockerCodingBackend(DockerReadBackend):
         super().__init__(snapshot, docker, image, writable=True)
         self.verification = VerificationLedger(self)
 
-    def run_verification(self, command, scope, timeout_seconds=60, kind='test'):
-        return self.verification.run(command, scope, timeout_seconds, kind)
+    def run_verification(self, command, scope, timeout_seconds=60, kind='test',
+                         behavior_ids=None, assertion='', purpose='verify', expected_failure=''):
+        return self.verification.run(command, scope, timeout_seconds, kind,
+                                     behavior_ids, assertion, purpose, expected_failure)
+
+    def verification_command(self, command, timeout_seconds, structured):
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
+            raise ValueError('命令超时必须为 1–60 秒。')
+        return self._call('command', {'command': command, 'timeout_seconds': timeout_seconds,
+                                     'verification_report': structured})
 
     def review_work(self):
         import json
         with self._lock:
-            return json.dumps({**self.verification.assess(),
-                               **self.verification.review_changes()}, ensure_ascii=False)
+            return json.dumps(self.verification.review(), ensure_ascii=False)
 
     def _call(self, action, args, *, approved_write=False):
         with self._lock:

@@ -11,6 +11,19 @@ from uuid import uuid4
 from cli_rb.workspace.snapshot import SECRET, Snapshot, excluded
 
 
+def bounded_file_bytes(path, max_file_bytes):
+    # Benchmark files allow up to 64 MiB. Allocating that read buffer for every
+    # tiny source file dominates Windows scans; bounded chunks keep the same cap.
+    chunks, total = [], 0
+    with open(path, 'rb') as stream:
+        while chunk := stream.read(min(65536, max_file_bytes + 1 - total)):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_file_bytes:
+                raise ValueError(f"文件超过 {max_file_bytes} 字节，无法导出：{path}")
+    return b''.join(chunks)
+
+
 def file_bytes(root: Path, name: str, max_file_bytes=1024 * 1024) -> bytes:
     current = root
     for part in PurePosixPath(name).parts:
@@ -20,36 +33,39 @@ def file_bytes(root: Path, name: str, max_file_bytes=1024 * 1024) -> bytes:
             raise ValueError("补丁不接受链接或重解析点。")
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("补丁仅支持普通文件。")
-    with current.open("rb") as stream:
-        content = stream.read(max_file_bytes + 1)
-    if len(content) > max_file_bytes:
-        raise ValueError(f"文件超过 {max_file_bytes} 字节，无法导出：{name}")
-    return content
+    return bounded_file_bytes(current, max_file_bytes)
 
 
 def inventory(root: Path, ignored=(), *, max_file_bytes=1024 * 1024):
     files = {}
     total = 0
-    for directory, dirs, names in os.walk(root, followlinks=False):
-        for name in list(dirs) + names:
-            path = Path(directory) / name
-            relative = path.relative_to(root).as_posix()
-            if excluded(PurePosixPath(relative)) or any(relative == p or relative.startswith(p + "/") for p in ignored):
-                if name in dirs:
-                    dirs.remove(name)
-                continue
-            if any(ord(c) < 32 for c in relative) or ":" in relative or "\\" in relative:
-                raise ValueError("补丁包含不支持的文件名。")
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                raise ValueError(f"发现链接，拒绝导出：{relative}")
-            if name in dirs:
-                continue
-            data = file_bytes(root, relative, max_file_bytes)
-            total += len(data)
-            if len(files) >= 10000 or total > 64 * 1024 * 1024:
-                raise ValueError("副本超过补丁大小限制。")
-            files[relative] = data
+    ignored = set(ignored)
+    pending = [(root, '')]
+    # Validate each directory once before descent. DirEntry.stat reuses Windows
+    # enumeration metadata, avoiding repeated lstat of every file's ancestors.
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                relative = prefix + entry.name
+                path = PurePosixPath(relative)
+                if excluded(path) or relative in ignored or any(str(p) in ignored for p in path.parents):
+                    continue
+                if any(ord(c) < 32 for c in relative) or ':' in relative or '\\' in relative:
+                    raise ValueError("补丁包含不支持的文件名。")
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                    raise ValueError(f"发现链接，拒绝导出：{relative}")
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append((entry.path, relative + '/'))
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("补丁仅支持普通文件。")
+                data = bounded_file_bytes(entry.path, max_file_bytes)
+                total += len(data)
+                if len(files) >= 10000 or total > 64 * 1024 * 1024:
+                    raise ValueError("副本超过补丁大小限制。")
+                files[relative] = data
     return files
 
 
@@ -93,6 +109,7 @@ class PatchService:
         self.snapshot = snapshot
         self.max_file_bytes = snapshot.manifest.get('max_file_bytes', 1024 * 1024)
         self.last_export = None
+        self._before = None
         if snapshot.mode == "direct":
             self.baseline = snapshot.session / "workspace"
             return
@@ -100,6 +117,7 @@ class PatchService:
         if snapshot.resumed:
             return  # load_snapshot already verified the original baseline hashes.
         self.baseline.mkdir(exist_ok=False)
+        before = {}
         for name, digest in snapshot.manifest["files"].items():
             content = file_bytes(snapshot.workspace, name, self.max_file_bytes)
             if hashlib.sha256(content).hexdigest() != digest:
@@ -107,9 +125,18 @@ class PatchService:
             target = self.baseline / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
+            before[name] = content
+        self._before = before
+
+    def baseline_files(self):
+        # The application-owned baseline is immutable and never mounted writable.
+        if self._before is None:
+            self._before = {name: file_bytes(self.baseline, name, self.max_file_bytes)
+                            for name in self.snapshot.manifest['files']}
+        return self._before
 
     def diff(self):
-        before = {name: file_bytes(self.baseline, name, self.max_file_bytes) for name in self.snapshot.manifest["files"]}
+        before = self.baseline_files()
         ignored = set(self.snapshot.manifest["excluded"])
         if self.snapshot.mode == "direct":
             from cli_rb.workspace.live_workspace import ignored_paths

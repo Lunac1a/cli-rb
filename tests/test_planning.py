@@ -60,7 +60,7 @@ def test_plan_survives_history_replacement_reopen_and_confirmed_recovery(tmp_pat
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='只说明待办')])]
                 assert events[-1].text == '仍需验证'
                 assert 'ORCHID-731' in model.seen[-1][0].text
-                assert '写操作必须重新授权' in model.seen[-1][0].text
+                assert 'writes require renewed authorization' in model.seen[-1][0].text
                 assert not any(isinstance(e, ToolMessage) for e in events)
                 records = [json.loads(line) for line in (tmp_path/'context-calls.jsonl').read_text().splitlines()]
                 assert records[-1]['input_estimate'] > 0

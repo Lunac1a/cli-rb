@@ -6,6 +6,7 @@ import ast
 import os
 from pathlib import Path, PurePosixPath
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,12 @@ def execute_command(root, args):
     if not cwd.is_dir():
         raise ValueError("命令工作目录不存在。")
 
+    report_path = None
+    if args.get('verification_report'):
+        report_path = pytest_report_path(command)
+        if report_path:
+            command += ' --junitxml=' + shlex.quote(str(report_path))
+
     def limits():
         resource.setrlimit(resource.RLIMIT_FSIZE, (8 * 1024 * 1024, 8 * 1024 * 1024))
 
@@ -82,9 +89,40 @@ def execute_command(root, args):
             process.wait()
         output.seek(0)
         captured = output.read().decode("utf-8", errors="replace")
+    report = None
+    report_error = None
+    if report_path:
+        try:
+            if report_path.exists():
+                report = text_file(report_path)
+        except (OSError, ValueError, UnicodeError) as exc:
+            report_error = type(exc).__name__
+        finally:
+            report_path.unlink(missing_ok=True)
     return json.dumps({"exit_code": process.returncode, "timed_out": timed_out,
                        "output": captured, "output_limit_bytes": 8 * 1024 * 1024,
+                       "executed_command": command, "junit_xml": report, "report_error": report_error,
                        "shell": "bash", "pipefail": True}, ensure_ascii=False)
+
+
+def pytest_report_path(command):
+    """Only append a reporting option to a simple direct pytest invocation."""
+    if any(char in command for char in '\n\r;&|<>`$#'):
+        return None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    executable = Path(words[0]).name if words else ''
+    pytest = executable in {'pytest', 'py.test'} or (
+        executable in {'python', 'python3'} and words[1:3] == ['-m', 'pytest'])
+    if not pytest or '--' in words or any(w.startswith(('--junit', '--xml')) for w in words):
+        return None
+    # Fresh path, outside the workspace; no stale report can be reused.
+    handle, name = tempfile.mkstemp(prefix='cli-rb-verification-', suffix='.xml')
+    os.close(handle)
+    Path(name).unlink()
+    return Path(name)
 
 
 def resolve(root, value):

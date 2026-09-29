@@ -6,28 +6,33 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import SystemMessage
 
 
-PLANNING_PROMPT = """## 工作计划
-复杂编码任务使用 write_todos 维护简短计划。先把用户目标拆成可执行的子目标，并在条目中写清完成条件；需要调查才能确定的内容先标为待查，不猜测答案。普通问答或简单修改无需计划。
-每次选择行动时参考当前计划与真实工具结果。发现新信息或某一步完成后更新计划，允许修订已有条目；不要为更新计划而重复工具操作。新用户要求到来时先核对旧计划是否仍适用。
-completed 表示已有证据满足该条目的完成条件。标记前在 content 中简记实际检查及结果；测试通过只支持它覆盖的行为。结果不符合预期就保留未完成并调整下一步，受阻或预算不足时如实收尾。
-一次只调用一个 write_todos；它替换完整清单，应保留仍相关的目标。计划内容和状态是工作记录，不是外部验证或新的授权。最后一次计划更新后仍需单独给出实际结果与未完成项。"""
+PLANNING_PROMPT = """## Work plan
+Use write_todos to maintain a concise plan for complex coding tasks. Split the request into actionable subgoals with completion conditions. Mark unknowns as requiring investigation rather than guessing. Ordinary questions or simple edits need no plan.
+Choose actions from the current plan and actual tool results. Update the plan when new information arrives or a step completes, but do not repeat tool operations merely to update it. Reassess relevance when the user changes the request.
+write_todos manages work progress only; do not put verification definitions in todos. Register observable product behavior separately with register_behavior after investigation. Investigation, editing, and running tests are work steps, not product behaviors. Updating progress never changes registered behavior definitions or evidence.
+Run necessary checks once. Use bind_verification to link existing evidence and exact returned test nodes to a behavior; no re-execution is needed just to establish a binding. Passing checks support only the selected assertions, not complete task coverage.
+completed means evidence satisfies the entry's completion conditions. Briefly record the actual check and result in content before marking it. Passing tests support only covered behaviors. Keep an entry incomplete and revise next steps when results differ from expectations; report blockers or exhausted budgets honestly.
+Call write_todos only once at a time. It replaces the full list, so retain relevant goals. Plan contents and statuses are working records, not external verification or new authorization. After the last plan update, separately report actual results and unfinished work."""
 
-TOOL_DESCRIPTION = """创建或更新当前任务的完整工作计划。todos 每项包含 content 和 status（pending/in_progress/completed）。content 写子目标与完成条件，完成时简记证据。一次提交完整清单；根据实际结果修订，不把预计成功写为完成。"""
+TOOL_DESCRIPTION = """Create or update the complete current work plan. Each todo has content and status (pending/in_progress/completed). State the subgoal and completion condition in content, with brief evidence when completed. Submit the full list each time. Revise it from actual results; do not mark anticipated success as completed."""
 
 
 def planning_prompt(state):
     todos = json.dumps(state.get('todos', []), ensure_ascii=False)
-    return PLANNING_PROMPT + '\n当前计划（模型维护的工作记录）：\n' + todos
+    return PLANNING_PROMPT + '\nCurrent plan (model-maintained working record):\n' + todos
 
 
 class PlanningMiddleware(TodoListMiddleware):
-    def __init__(self):
+    def __init__(self, verification=None):
         super().__init__(system_prompt=PLANNING_PROMPT, tool_description=TOOL_DESCRIPTION)
+        self.verification = verification
 
-    @staticmethod
-    def planned_request(request):
+    def planned_request(self, request):
         blocks = list(request.system_message.content_blocks) if request.system_message else []
         blocks.append({'type': 'text', 'text': '\n\n' + planning_prompt(request.state)})
+        if self.verification is not None:
+            blocks.append({'type': 'text', 'text': '\nRegistered product behaviors (independent of todos):\n' +
+                           json.dumps(self.verification.requirements(), ensure_ascii=False)})
         return request.override(system_message=SystemMessage(content=blocks))
 
     def wrap_model_call(self, request, handler):

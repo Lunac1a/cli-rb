@@ -45,11 +45,17 @@ def backend(tmp_path):
 
 
 def success():
-    return {'exit_code': 0, 'timed_out': False, 'output': '3 passed in 0.1s'}
+    return {'exit_code': 0, 'timed_out': False, 'output':
+            ''.join(f'tests/test_app.py::test_{i} PASSED [100%]\n' for i in range(3)) + '3 passed in 0.1s'}
 
 
 def call(name, **args):
     return AIMessage(content='', tool_calls=[{'name': name, 'args': args, 'id': name, 'type': 'tool_call'}])
+
+
+def behavior_plan():
+    return call('register_behavior', behavior_id='value', expected='value is two',
+                assertion='assert value == 2', affected_paths=['app.py'])
 
 
 @pytest.mark.parametrize('output,code,timed,status', [
@@ -68,7 +74,7 @@ def test_observed_results_not_exit_code_alone(output, code, timed, status):
 
 
 def test_ledger_survives_reload_detects_external_edits_and_reads_full_output(backend):
-    backend.outcomes = [{**success(), 'output': 'x' * 20000 + '\n3 passed in 0.1s'}]
+    backend.outcomes = [{**success(), 'output': 'x' * 20000 + '\n' + success()['output']}]
     evidence = json.loads(backend.run_verification('pytest', 'parser'))
     assert evidence['outcome'] == 'passed'
     restored = VerificationLedger(backend)
@@ -100,15 +106,16 @@ def test_framework_feedback_repairs_before_releasing_final_answer(backend):
     model = ScriptedModel(replies=[
         call('edit_file', path='app.py', old_text='value = 1', new_text='value = 2'),
         AIMessage(content='UNVERIFIED DRAFT'),
-        call('run_verification', command='pytest', scope='value behavior'),
+        behavior_plan(),
+        call('run_verification', command='pytest', scope='value behavior', behavior_ids=['value'], assertion='assert value == 2'),
         AIMessage(content='已修改并验证。'),
     ])
     events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='修复')]))
-    assert len(model.seen) == 4
+    assert len(model.seen) == 5
     assert not any('UNVERIFIED DRAFT' in e.text for e in events)
     assert events[-1].response_metadata['completion_check']['status'] == 'evidence_current'
     assert '[程序核对]' in events[-1].text
-    assert any('程序收尾核对' in m.text for m in model.seen[2])
+    assert any('Program completion check' in m.text for m in model.seen[2])
 
 
 def test_feedback_is_bounded_and_never_hides_unresolved_evidence(backend):
@@ -169,8 +176,9 @@ def test_persisted_final_audit_survives_reopening_and_next_question(backend):
         with SessionStore(session, create=True) as store:
             async with AsyncSqliteSaver.from_conn_string(str(session/'checkpoints.sqlite')) as saver:
                 model = ScriptedModel(replies=[
+                    behavior_plan(),
                     call('edit_file', path='app.py', old_text='value = 1', new_text='value = 2'),
-                    call('run_verification', command='pytest', scope='value'), AIMessage(content='已验证')])
+                    call('run_verification', command='pytest', scope='value', behavior_ids=['value'], assertion='assert value == 2'), AIMessage(content='已验证')])
                 agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='修改')])]
                 assert events[-1].response_metadata['completion_check']['status'] == 'evidence_current'

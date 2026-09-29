@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 
 from cli_rb.interface.cli import report_empty_reply
 from cli_rb.workspace.container_worker import execute
-from cli_rb.workspace.patches import PatchService, text_patch
+from cli_rb.workspace.patches import PatchService, text_patch, inventory, file_bytes
 from cli_rb.workspace.snapshot import create_snapshot
 
 
@@ -65,6 +65,21 @@ def test_patch_rejects_changed_binary_or_known_secret():
         text_patch({"binary": b"\0a"}, {"binary": b"\0b"})
     with pytest.raises(ValueError):
         text_patch({}, {"secret.txt": b"ghp_" + b"x" * 36})
+
+
+def test_inventory_reads_chunk_boundaries_and_ignores_exact_subtrees(tmp_path):
+    (tmp_path / 'kept').mkdir()
+    (tmp_path / 'kept/a').write_bytes(b'x' * 65536)
+    (tmp_path / 'kept/b').write_bytes(b'y' * 65537)
+    (tmp_path / 'omit').mkdir()
+    (tmp_path / 'omit/large').write_bytes(b'z' * 65538)
+    assert inventory(tmp_path, ['omit'], max_file_bytes=65537) == {
+        'kept/a': b'x' * 65536, 'kept/b': b'y' * 65537}
+    assert file_bytes(tmp_path, 'kept/b', 65537) == b'y' * 65537
+    with pytest.raises(ValueError, match='65536'):
+        inventory(tmp_path, ['omit'], max_file_bytes=65536)
+    with pytest.raises(ValueError, match='65536'):
+        file_bytes(tmp_path, 'kept/b', 65536)
 
 
 def test_empty_reply_reports_evidence_without_claiming_success(capsys):
