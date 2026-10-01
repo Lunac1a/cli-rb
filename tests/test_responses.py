@@ -10,7 +10,8 @@ from cli_rb.config import ModelConfig
 from cli_rb.workspace.tools import FixtureBackend
 
 
-def test_responses_streaming_tool_roundtrip_preserves_reasoning(monkeypatch):
+@pytest.mark.parametrize('transient_failure', [False, True])
+def test_responses_streaming_tool_roundtrip_preserves_reasoning(monkeypatch, transient_failure):
     requests = []
 
     def serve(request):
@@ -22,6 +23,8 @@ def test_responses_streaming_tool_roundtrip_preserves_reasoning(monkeypatch):
         assert payload['reasoning'] == {'effort': 'medium'}
         assert payload['max_output_tokens'] == 32768
         assert 'temperature' not in payload
+        if transient_failure and len(requests) == 2:
+            return httpx.Response(502, json={'error': {'message': 'Upstream service temporarily unavailable', 'type': 'upstream_error'}})
         first = len(requests) == 1
         reasoning = {'type': 'reasoning', 'id': 'rs_1', 'summary': [],
                      'encrypted_content': 'opaque-test-reasoning'}
@@ -59,7 +62,10 @@ def test_responses_streaming_tool_roundtrip_preserves_reasoning(monkeypatch):
     model = ModelConfig.from_env().build_model()
     result = list(stream_turn(build_agent(model, FixtureBackend({'README.md': 'evidence'})),
                               [HumanMessage(content='Read README.md then answer.')]))
-    assert len(requests) == 2
+    assert len(requests) == (3 if transient_failure else 2)
+    if transient_failure:
+        assert requests[1] == requests[2]
+        assert sum(isinstance(item, ToolMessage) for item in result) == 1
     assert any(isinstance(item, ToolMessage) and item.tool_call_id == 'call_1' for item in result)
     assert result[-1].text == 'Read evidence.'
     assert result[-1].usage_metadata['output_token_details']['reasoning'] == 3

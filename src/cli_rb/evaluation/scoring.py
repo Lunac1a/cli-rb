@@ -6,7 +6,26 @@ generates official scripts and grades captured logs; it never controls Docker.
 
 import argparse
 import json
+import re
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+
+def normalize_test_log(text, repo):
+    """Remove display decoration, never infer or invent test outcomes."""
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+    if repo == 'sphinx-doc/sphinx':
+        text = re.sub(r'^(\S+\.py::[^\r\n]+? (?:PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR))'
+                      r' +\[ *\d+%\](?=\r?$)', r'\1', text, flags=re.M)
+    return text
+
+
+def infrastructure_errors(text):
+    # Only explicit infrastructure signatures, not generic failing assertions.
+    return [reason for pattern, reason in [
+        ('Temporary failure in name resolution', 'network_name_resolution'),
+        ('Network is unreachable', 'network_unreachable'),
+    ] if pattern in text]
 
 
 def evidence_coverage(expected, observed, log_ok=True):
@@ -41,11 +60,19 @@ def main():
         prediction = json.loads(args.prediction.read_text(encoding='utf-8'))
         if prediction['instance_id'] != args.instance_id:
             raise ValueError('Prediction instance ID mismatch')
-        report = get_eval_report(spec, prediction, args.test_log, include_tests_status=True)
-        observed, log_ok = get_logs_eval(spec, str(args.test_log))
+        raw = args.test_log.read_text(encoding='utf-8')
+        normalized = normalize_test_log(raw, row['repo'])
+        problems = infrastructure_errors(raw)
+        with TemporaryDirectory() as directory:
+            parser_input = Path(directory) / args.test_log.name
+            parser_input.write_text(normalized, encoding='utf-8')
+            report = get_eval_report(spec, prediction, parser_input, include_tests_status=True)
+            observed, log_ok = get_logs_eval(spec, str(parser_input))
         coverage = evidence_coverage([*spec.FAIL_TO_PASS, *spec.PASS_TO_PASS], observed, log_ok)
         report[args.instance_id]['evidence_coverage'] = coverage
-        if not coverage['valid']:
+        report[args.instance_id]['infrastructure_errors'] = problems
+        report[args.instance_id]['log_normalized'] = normalized != raw
+        if not coverage['valid'] or problems:
             report[args.instance_id]['raw_official_resolved'] = report[args.instance_id]['resolved']
             report[args.instance_id]['resolved'] = None
             report[args.instance_id]['evaluation_status'] = 'evaluation_error'

@@ -50,6 +50,8 @@ def test_readonly_and_traversal_do_not_write(tmp_path):
     ({"中文.txt": b"old\r\n"}, {"中文.txt": b"new\r\n"}),
 ])
 def test_patch_applies_exact_bytes_including_added_deleted_files(tmp_path, before, after):
+    # Isolate git apply from any enclosing repository when --basetemp is local.
+    subprocess.run(['git', 'init', str(tmp_path)], check=True, capture_output=True)
     for name, content in before.items():
         (tmp_path / name).write_bytes(content)
     patch = tmp_path.parent / f"{tmp_path.name}.patch"
@@ -57,7 +59,7 @@ def test_patch_applies_exact_bytes_including_added_deleted_files(tmp_path, befor
     run = subprocess.run(["git", "-c", "core.autocrlf=false", "apply", str(patch)],
                          cwd=tmp_path, capture_output=True)
     assert run.returncode == 0, run.stderr
-    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == after
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.name != '.git'} == after
 
 
 def test_patch_rejects_changed_binary_or_known_secret():

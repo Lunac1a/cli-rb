@@ -36,7 +36,8 @@ def file_bytes(root: Path, name: str, max_file_bytes=1024 * 1024) -> bytes:
     return bounded_file_bytes(current, max_file_bytes)
 
 
-def inventory(root: Path, ignored=(), *, max_file_bytes=1024 * 1024):
+def inventory(root: Path, ignored=(), *, max_file_bytes=1024 * 1024,
+              max_total_bytes=64 * 1024 * 1024):
     files = {}
     total = 0
     ignored = set(ignored)
@@ -63,7 +64,7 @@ def inventory(root: Path, ignored=(), *, max_file_bytes=1024 * 1024):
                     raise ValueError("补丁仅支持普通文件。")
                 data = bounded_file_bytes(entry.path, max_file_bytes)
                 total += len(data)
-                if len(files) >= 10000 or total > 64 * 1024 * 1024:
+                if len(files) >= 10000 or total > max_total_bytes:
                     raise ValueError("副本超过补丁大小限制。")
                 files[relative] = data
     return files
@@ -138,10 +139,11 @@ class PatchService:
     def diff(self):
         before = self.baseline_files()
         ignored = set(self.snapshot.manifest["excluded"])
-        if self.snapshot.mode == "direct":
-            from cli_rb.workspace.live_workspace import ignored_paths
-            ignored |= ignored_paths(self.snapshot.workspace) - before.keys()
-        return text_patch(before, inventory(self.snapshot.workspace, ignored, max_file_bytes=self.max_file_bytes))
+        from cli_rb.workspace.ignore_rules import snapshot_ignored_paths
+        ignored |= snapshot_ignored_paths(self.snapshot)
+        return text_patch(before, inventory(
+            self.snapshot.workspace, ignored, max_file_bytes=self.max_file_bytes,
+            max_total_bytes=self.snapshot.manifest.get('max_total_bytes', 64 * 1024 * 1024)))
 
     def export(self):
         patch = self.diff()

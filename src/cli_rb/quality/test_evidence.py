@@ -100,7 +100,7 @@ def parse_test_evidence(result):
             'nodes': nodes, 'nodes_complete': complete}
 
 
-def resolve_evidence(records):
+def resolve_evidence(records, reconciliations=()):
     """Return active portions and explicit replacement links; keep the raw ledger intact.
 
     Only complete node receipts can replace node receipts. Summary-only/legacy runs
@@ -115,7 +115,8 @@ def resolve_evidence(records):
             for previous in active:
                 old = previous['record']
                 tested = {node for node, status in (nodes or {}).items()
-                          if status in {'passed', 'failed', 'errors'}}
+                          if status in {'passed', 'failed', 'errors'} or
+                          status == (previous['nodes'] or {}).get(node) == 'xfailed'}
                 overlap = set(previous['nodes'] or {}) & tested
                 same_check = (record['kind'] == old['kind'] == 'check'
                               and record['command'] == old['command'])
@@ -146,7 +147,20 @@ def resolve_evidence(records):
                                          'command': record['command']})
         active.append({'record': record, 'nodes': nodes, 'replaced': False})
         active = [item for item in active if not item['replaced'] and item['nodes'] != {}]
-    return active, replacements
+    for link in reconciliations:
+        for previous in active:
+            if previous['record']['id'] == link['old_id'] and link.get('check_migration'):
+                previous['replaced'] = True
+                replacements.append({**link, 'basis': 'explicit_check_to_test_claim'})
+                continue
+            if previous['record']['id'] == link['old_id'] and previous['nodes'] is not None:
+                overlap = set(previous['nodes']) & set(link['old_nodes'])
+                if overlap:
+                    for node in overlap:
+                        del previous['nodes'][node]
+                    replacements.append({**link, 'nodes': sorted(overlap),
+                                         'basis': 'explicit_test_replacement_claim'})
+    return [item for item in active if item['nodes'] != {} and not item['replaced']], replacements
 
 
 def evidence_summary(report):
@@ -171,4 +185,9 @@ def evidence_summary(report):
         lines.append(f"- {item['id']}：原运行 {amounts}；仍关联部分 {item['remaining_outcome']}；{version}{coverage}")
     if report.get('replacements'):
         lines.append(f"新旧证据有 {len(report['replacements'])} 条替代关系，原日志保留；上述计数按每次运行列出，不跨运行相加。")
+        for link in report['replacements']:
+            if link.get('basis') in {'explicit_test_replacement_claim', 'explicit_check_to_test_claim'}:
+                lines.append(f"- 显式替代 {link['old_id']} → {link['new_id']}：{link['reason']}（覆盖关系为模型声明，不是程序证明）")
+    for risk in report.get('risks', []):
+        lines.append(f'- 审阅提醒（不自动判定未完成）：{risk}')
     return '\n'.join(lines)

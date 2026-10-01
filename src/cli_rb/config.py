@@ -84,6 +84,7 @@ class ModelConfig:
             max_tokens=self.max_output_tokens,
             timeout=self.request_timeout_seconds,
             stream_chunk_timeout=self.request_timeout_seconds,
-            max_retries=1,
+            # Harness retries remain visible to callbacks and request budgets.
+            max_retries=0,
             **protocol,
         )

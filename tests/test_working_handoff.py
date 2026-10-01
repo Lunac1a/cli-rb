@@ -85,7 +85,7 @@ def test_graph_recovers_exact_archived_text_and_archive_survives_reopen(folder):
     asyncio.run(run())
 
 
-def test_repeated_compaction_preserves_archive_and_rejects_oversized_handoff(folder):
+def test_repeated_compaction_preserves_archive_and_accepts_soft_target_overrun(folder):
     async def run():
         with SessionStore(folder, create=True) as store:
             model = ScriptedModel(replies=[AIMessage(content='handoff one'), AIMessage(content='z' * 6000)])
@@ -95,10 +95,11 @@ def test_repeated_compaction_preserves_archive_and_rejects_oversized_handoff(fol
             update = await context.abefore_model({'messages': first}, None)
             second = [*update['messages'][1:], AIMessage(content='b' * 48000), HumanMessage(content='next', id='new')]
             rejected = await context.abefore_model({'messages': second}, None)
-            assert 'messages' not in rejected
+            assert 'messages' in rejected
             assert HistoryArchive(folder).read('original needle')['messages'][0]['id'] == 'old'
             records = [json.loads(line) for line in (folder/'context-calls.jsonl').read_text().splitlines()]
-            assert records[-1]['outcome'] == 'summary_budget_exceeded'
+            assert records[-1]['outcome'] == 'accepted'
+            assert records[-1]['above_soft_target'] is True
             assert 'handoff one' in model.seen[-1][-1].text
     asyncio.run(run())
 

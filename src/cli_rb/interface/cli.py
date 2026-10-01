@@ -13,14 +13,18 @@ from typing import Annotated
 
 import typer
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from prompt_toolkit import PromptSession
+from rich.syntax import Syntax
 from rich.console import Console
+from rich.markdown import Markdown
+from cli_rb.interface.input import chat_prompt
+from cli_rb.interface.presentation import activity, print_answer, print_details, TurnProgress, progress_entries, SessionMetrics
+from cli_rb.interface.workspace_selection import select_workspace
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from cli_rb.runtime.agent import (
     build_agent, stream_turn, astream_turn, TextDelta, ContextUpdate, has_reply, TaskTimeLimitExceeded,
 )
-from cli_rb.interface.approval import TerminalApproval
+from cli_rb.interface.approval import TerminalApproval, approval_dialog
 from cli_rb.runtime.context import ContextLimitExceeded
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
@@ -31,6 +35,7 @@ from cli_rb.workspace.docker_backend import DockerReadBackend, prepare_image, en
 from cli_rb.workspace.snapshot import create_snapshot, create_session, load_snapshot
 from cli_rb.runtime.persistence import SessionStore, SessionNotReady, inspect_session, recovery_messages
 from cli_rb.workspace.coding_backend import DockerCodingBackend
+from cli_rb.workspace.local_backend import LocalCodingBackend
 
 app = typer.Typer(invoke_without_command=True, help="CLI Rb：本地工作区编码助手。")
 console = Console()
@@ -48,15 +53,13 @@ def disable_remote_tracing():
 
 def render(message, *, show_text=True):
     if isinstance(message, ToolMessage):
-        console.print(f"工具返回 [{message.name}]：{message.content}", markup=False)
+        if message.status == 'error' or str(message.content).startswith('工具错误'):
+            console.print('操作未成功，正在检查原因…', style='yellow')
     elif isinstance(message, AIMessage):
-        recovery = message.response_metadata.get("final_reply_recovery")
-        if recovery:
-            console.print(f"程序：已尝试一次无工具的答复补全（{recovery}）；没有重跑工具。")
         for call in message.tool_calls:
-            console.print(f"模型请求工具：{call['name']} {call['args']}", markup=False)
-        if show_text and message.text:
-            console.print(f"Agent：{message.text}", markup=False)
+            console.print(activity(call), style='dim', markup=False)
+        if show_text and not message.tool_calls and message.text:
+            print_answer(console, message.text, message.response_metadata.get('completion_check'))
 
 
 def report_empty_reply(messages, backend, evidence_start=0):
@@ -66,7 +69,8 @@ def report_empty_reply(messages, backend, evidence_start=0):
     evidence = backend.command_evidence[evidence_start:]
     if evidence:
         for item in evidence:
-            console.print(json.dumps(item, ensure_ascii=False), markup=False)
+            label = '超时' if item.get('timed_out') else f"退出码 {item.get('exit_code', '未知')}"
+            console.print(f"验证记录：{label}；完整日志已保存在会话中。", markup=False)
     else:
         console.print("本轮没有命令验证记录。")
     if backend.patches.last_export:
@@ -77,45 +81,57 @@ def report_empty_reply(messages, backend, evidence_start=0):
 
 async def display_turn(agent, history, backend, completed):
     """Only complete messages enter history; cancellation never becomes a reply."""
-    text_open = False
     original_approval = getattr(backend, "approve", None)
     approval = None
     finished = False
+    metrics = getattr(backend, "ui_metrics", None) or SessionMetrics()
+    metrics.begin()
+    status = TurnProgress(console, metrics)
+    async def ask(action):
+        status.stop()
+        try:
+            return await original_approval(action)
+        finally:
+            status.start()
     if inspect.iscoroutinefunction(original_approval):
-        approval = TerminalApproval(asyncio.get_running_loop(), original_approval,
+        approval = TerminalApproval(asyncio.get_running_loop(), ask,
                                     asyncio.current_task().cancel)
         backend.approve = approval
+    status.start()
     try:
         async with aclosing(astream_turn(agent, history)) as events:
             async for event in events:
                 if isinstance(event, ContextUpdate):
-                    console.print(f'程序：已整理工作上下文（保守估算约{event.estimate} tokens）；原始记录仍保存在本地检查点和日志。')
+                    metrics.estimate, metrics.limit = event.estimate, event.input_limit
+                    if event.compacted:
+                        status.update('正在整理会话，保留你的要求…')
                 elif isinstance(event, TextDelta):
-                    if not text_open:
-                        console.print("Agent：", end="", markup=False)
-                        text_open = True
-                    console.print(event.text, end="", markup=False, highlight=False, soft_wrap=True)
+                    # Render only the complete visible answer, never partial tool prose.
+                    status.update('正在整理答复…')
                 else:
-                    streamed = text_open and isinstance(event, AIMessage)
-                    if text_open:
-                        console.print()
-                        text_open = False
                     history.append(event)
                     completed.append(event)
-                    render(event, show_text=not streamed)
+                    status.record(event)
+                    if isinstance(event, AIMessage) and event.tool_calls:
+                        status.update(activity(event.tool_calls[0]))
+                    elif isinstance(event, ToolMessage):
+                        status.update('正在检查操作结果…')
+                    elif isinstance(event, AIMessage) and event.text:
+                        status.stop()
+                        print_answer(console, event.text, event.response_metadata.get('completion_check'))
+                        if progress_entries(completed):
+                            console.print('执行过程已收起，输入 /progress 查看。', style='dim')
         finished = True
     except BaseException:
-        # Async cancellation stops the HTTP request; synchronous Docker workers need
-        # explicit cleanup before asyncio waits for its executor threads to finish.
         backend.cancel_all()
         raise
     finally:
+        metrics.finish(finished)
+        status.stop()
         if approval:
             approval.close()
             if finished:
                 backend.approve = original_approval
-        if text_open:
-            console.print()
 
 
 def report_model_limit(error):
@@ -141,17 +157,18 @@ def report_time_limit(error):
 
 @app.callback()
 def main(ctx: typer.Context, isolated: bool = False, task_minutes: TaskMinutes = 30,
-         resume: Path | None = None):
+         resume: Path | None = None, local: bool = True):
     disable_remote_tracing()
     # Propagate the root option to explicit subcommands; a subcommand option wins.
     defaults = dict(ctx.default_map or {})
     for command in ("chat", "run-task"):
         defaults[command] = {**defaults.get(command, {}), "task_minutes": task_minutes}
     ctx.default_map = defaults
+    defaults['chat']['local'] = local
     if resume:
         defaults['chat']['resume'] = resume
     if ctx.invoked_subcommand is None:
-        chat(isolated=isolated, task_minutes=task_minutes, resume=resume)
+        chat(isolated=isolated, task_minutes=task_minutes, resume=resume, local=local)
 
 
 @app.command('inspect-session')
@@ -186,7 +203,7 @@ def explain_session(session: Path, request: Annotated[str, typer.Option(
         config = ModelConfig(**metadata['model_config'])
         console.print('正在根据已有证据生成说明；独立请求最多120秒，不提供工具，不解除恢复限制。')
         reply = asyncio.run(explain_evidence(config.build_model(), evidence))
-        console.print(reply, markup=False, soft_wrap=True)
+        console.print(Markdown(reply))
         console.print('以上为模型解释，不是完成证明；原会话状态未改，没有重放工具。')
     except KeyboardInterrupt:
         console.print('说明生成已取消；原会话状态未改，没有重放工具。')
@@ -249,9 +266,7 @@ def smoke():
 
 
 async def approve_action(action):
-    console.print(action, markup=False)
-    answer = await PromptSession().prompt_async("允许此操作？[y/N] ")
-    return answer.strip().lower() in {"y", "yes"}
+    return await approval_dialog(action).run_async()
 
 
 def resume_history(runner, store, agent, backend, docker):
@@ -285,10 +300,16 @@ def resume_history(runner, store, agent, backend, docker):
 
 
 @app.command()
-def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | None = None):
-    """选择仓库并确认范围后，在 Docker 中调查、修改和验证本地工作区。"""
+def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | None = None, local: bool = True):
+    """打开项目；默认本地执行，--no-local 使用 Docker。"""
+    console.rule("CLI Rb · 编码助手", style="cyan")
     try:
+        if isolated:
+            local = False
         if resume:
+            if (resume / 'execution.json').exists():
+                raise ValueError('本地会话恢复尚未开放。已有修改和记录保留；请重新打开项目开始新会话。')
+            local = False
             snapshot = load_snapshot(resume)
             if isolated and snapshot.mode != 'isolated':
                 raise ValueError('恢复必须沿用原会话模式，不能把直接模式切换为隔离模式。')
@@ -299,32 +320,40 @@ def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | 
             config = ModelConfig.from_env()
             if not config.model:
                 config = replace(config, model=typer.prompt("模型 ID"))
-            source = Path(typer.prompt("Git 仓库目录", default=str(Path.cwd()))).expanduser()
+            preferences = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'CLI Rb' / 'workspace.json'
+            previous = json.loads(preferences.read_text(encoding='utf-8')) if preferences.exists() else {}
+            default_repo = previous.get('repo', os.environ.get('CLI_RB_DEFAULT_REPO', str(Path.cwd())))
+            source = select_workspace(console, default_repo)
         console.print(f"工作区：{source}", markup=False)
-        if isolated:
-            console.print("隔离模式：只修改筛选后的副本，原仓库不挂载；补丁可选导出。")
+        if local:
+            console.print('使用本机开发环境；常规操作自动批准，重要操作需确认。', style='dim')
         else:
-            console.print("直接模式：普通编辑立即写入所选本地仓库；保存会话起点作为差异基线。")
-            console.print("删除已有文件、允许命令写入仓库需要单独授权；普通命令只读访问仓库。")
-        console.print("命令在禁网 Linux 容器内运行；镜像提供 Python 标准库。Git 元数据和常见凭据不可访问。")
-        if not typer.confirm("按此范围开始？", default=True):
-            return
+            console.print('使用隔离执行环境；' + ('修改保留在副本中。' if isolated else '文件编辑直接作用于当前项目。'))
+            if not typer.confirm('按此范围开始？', default=True):
+                return
         if not resume:
-            snapshot = create_session(source, Path.cwd() / ".cli-rb/sessions", "isolated" if isolated else "direct")
-        console.print(f"已保存基线 {len(snapshot.manifest['files'])} 个文件；排除 {len(snapshot.manifest['excluded'])} 项。")
-        console.print(f"会话和筛选清单：{snapshot.session}", markup=False)
+            with console.status('正在准备工作区…'):
+                snapshot = create_session(source, Path.cwd() / ".cli-rb/sessions", "isolated" if isolated else "direct")
+            preferences.parent.mkdir(parents=True, exist_ok=True)
+            preferences.write_text(json.dumps({'repo': str(source)}, ensure_ascii=False), encoding='utf-8')
         with SessionStore(snapshot.session, create=not resume, model_config=(
             {'base_url': config.base_url, 'model': config.model} if config else None
         ), allow_interrupted=bool(resume)) as store:
             config = ModelConfig(**store.data['model_config'])
-            image = None
-            if resume:
-                image = json.loads((snapshot.session / 'container.json').read_text(encoding='utf-8'))['image']
-                if not image.startswith('sha256:') or len(image) != 71:
-                    raise ValueError('原会话镜像标识无效，拒绝替换镜像。')
-            docker, image = prepare_image(image)
-            backend = DockerCodingBackend(snapshot, docker, image, approve=approve_action,
-                                          review_writes=store.data.get('review_writes', False))
+            docker = None
+            if local:
+                backend = LocalCodingBackend(snapshot, approve=approve_action)
+                backend.enable_review(config)
+            else:
+                image = None
+                if resume:
+                    image = json.loads((snapshot.session / 'container.json').read_text(encoding='utf-8'))['image']
+                    if not image.startswith('sha256:') or len(image) != 71:
+                        raise ValueError('原会话镜像标识无效，拒绝替换镜像。')
+                with console.status('正在准备执行环境…'):
+                    docker, image = prepare_image(image)
+                backend = DockerCodingBackend(snapshot, docker, image, approve=approve_action,
+                                              review_writes=store.data.get('review_writes', False))
             with asyncio.Runner() as runner:
                 connection = AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite'))
                 saver = runner.run(connection.__aenter__())
@@ -336,12 +365,13 @@ def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | 
                                else runner.run(store.history(agent)))
                     if history is None:
                         return
-                    console.print(f"已载入 {len(history)} 条历史消息。Enter 换行，Alt+Enter 提交，Ctrl+D 退出。")
-                    console.print(f"每条请求最多 {task_minutes} 分钟；完整结束的对话保存到本机会话目录。")
+                    console.print("准备好了。Enter 发送，Shift+Enter 换行。")
                     if backend.review_writes:
                         console.print('本会话含已核对的中断历史；修改、删除和可写命令仍需重新授权。')
-                    console.print('只处理新输入，不自动重放旧工具。')
-                    chat_loop(PromptSession(multiline=True), agent, backend, history, runner)
+                    console.print('输入 /help 查看命令。', style='dim')
+                    backend.ui_metrics = SessionMetrics()
+                    with chat_prompt(backend.ui_metrics) as session:
+                        chat_loop(session, agent, backend, history, runner)
                 finally:
                     runner.run(connection.__aexit__(None, None, None))
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, sqlite3.Error) as error:
@@ -357,10 +387,40 @@ def chat_loop(session, agent, backend, history, runner):
             text = session.prompt("你：")
             if not text.strip():
                 continue
+            if text.strip() in {'/exit', '/quit'}:
+                backend.cancel_all()
+                return
+            if text.strip() == '/help':
+                console.print(Markdown('**会话命令**\n\n- `/changes` 查看文件差异\n- `/details` 查看上次完整答复和验证说明\n- `/progress` 查看本轮执行过程\n- `/status` 查看会话位置\n- `/exit` 退出\n\nEnter 发送，Shift+Enter 换行。'))
+                continue
+            if text.strip() == '/details':
+                reply = next((m for m in reversed(history)
+                              if isinstance(m, AIMessage) and not m.tool_calls and m.text), None)
+                if reply:
+                    print_details(console, reply.text, reply.response_metadata.get('completion_check'))
+                else:
+                    console.print('还没有完成的答复。')
+                continue
+            if text.strip() == '/progress':
+                lines = progress_entries(history)
+                console.print('\n'.join(lines) if lines else '当前还没有执行过程。', markup=False)
+                continue
+            if text.strip() == '/changes':
+                patch = backend.patches.diff()
+                console.print(Syntax(patch, 'diff', word_wrap=True) if patch else '当前没有文件差异。')
+                continue
+            if text.strip() == '/status':
+                console.print(f'工作区：{backend.snapshot.workspace}\n会话：{backend.snapshot.session}', markup=False)
+                if isinstance(backend, LocalCodingBackend):
+                    console.print('审批：常规操作自动通过，复杂操作独立审查，重要操作人工确认。')
+                    console.print('执行：本机账户权限，无操作系统沙箱。')
+                continue
             history.append(HumanMessage(content=text))
+            if hasattr(backend, 'user_task'):
+                backend.user_task = text
             turn_messages = []
             evidence_start = len(backend.command_evidence)
-            console.print("Agent 正在处理…")
+
             runner.run(display_turn(agent, history, backend, turn_messages))
             report_empty_reply(turn_messages, backend, evidence_start)
         except (KeyboardInterrupt, EOFError):

@@ -39,7 +39,7 @@ def test_summary_archives_originals_and_empty_reply_recovery_uses_compact_contex
                 agent = build_agent(model, demo_backend(), session=store, checkpointer=saver, model_call_limit=3)
                 await seed(agent, store)
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='代号是什么？')])]
-                assert any(isinstance(e, ContextUpdate) for e in events)
+                assert any(isinstance(e, ContextUpdate) and e.compacted for e in events)
                 assert events[-1].text == '橙湾731；验证未完成。'
                 assert len(model.seen) == 3
                 for sent in model.seen[1:]:
@@ -73,7 +73,7 @@ def test_optional_summary_fallback_and_hard_limits(tmp_path, failure):
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path/'checkpoints.sqlite')) as saver:
                 agent = build_agent(model, demo_backend(), session=store, checkpointer=saver,
                                     model_call_limit=1 if failure == 'budget' else 3,
-                                    context_policy=ContextPolicy(window=32768, summary_seconds=0.02))
+                                    context_policy=ContextPolicy(window=32768, summary_seconds=0.02, max_attempts=1))
                 await seed(agent, store)
                 text = '过大' * 20000 if failure == 'large_input' else '继续'
                 if failure == 'large_input':
@@ -130,7 +130,9 @@ def test_full_code_page_reaches_next_model_call_without_early_summary(tmp_path):
                 agent = build_agent(model, backend, session=store, checkpointer=saver)
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='Inspect the code.')])]
                 assert len(model.seen) == 2
-                assert not any(isinstance(e, ContextUpdate) for e in events)
+                updates = [e for e in events if isinstance(e, ContextUpdate)]
+                assert len(updates) == 2 and all(e.estimate > 0 and e.input_limit > e.estimate for e in updates)
+                assert not any(e.compacted for e in updates)
                 tool = next(m for m in model.seen[-1] if isinstance(m, ToolMessage))
                 assert tool.content == expected and 'key_50' in tool.content
         records = [json.loads(line) for line in (tmp_path/'context-calls.jsonl').read_text().splitlines()]
@@ -181,11 +183,11 @@ def test_summary_failure_records_specific_reason_without_accepting_it(tmp_path, 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('ratio,expected', [(0.79, 0), (0.84, 0), (0.86, 1)])
+@pytest.mark.parametrize('ratio,expected', [(0.79, 0), (0.84, 0), (0.86, 2)])
 def test_pressure_boundary_and_failed_attempt_latch(tmp_path, ratio, expected):
     async def run():
         with SessionStore(tmp_path, create=True) as store:
-            model = ScriptedModel(replies=[AIMessage(content='')])
+            model = ScriptedModel(replies=[AIMessage(content=''), AIMessage(content='')])
             context = build_agent(model, demo_backend(), session=store).context
             padding = int(context.policy.input_limit * ratio - context.total_size([
                 AIMessage(content=''), HumanMessage(content='current')]))
@@ -204,28 +206,28 @@ def test_pressure_boundary_and_failed_attempt_latch(tmp_path, ratio, expected):
 def test_failed_summary_at_hard_limit_preserves_attempt_and_originals(tmp_path):
     async def run():
         with SessionStore(tmp_path, create=True) as store:
-            model = ScriptedModel(replies=[AIMessage(content='')])
+            model = ScriptedModel(replies=[AIMessage(content=''), AIMessage(content='')])
             context = build_agent(model, demo_backend(), session=store).context
             messages = [AIMessage(content='a' * 54000), HumanMessage(content='keep')]
             with pytest.raises(ContextLimitExceeded):
                 await context.abefore_model({'messages': messages}, None)
             assert messages[0].content == 'a' * 54000
-            assert store.data['context_maintenance']['attempts'] == 1
+            assert store.data['context_maintenance']['attempts'] == 2
             with pytest.raises(ContextLimitExceeded):
                 await context.abefore_model({'messages': messages}, None)
-            assert len(model.seen) <= 1
+            assert len(model.seen) <= 2
     asyncio.run(run())
 
 
 def test_reject_summary_that_increases_context(tmp_path):
     async def run():
         with SessionStore(tmp_path, create=True) as store:
-            model = ScriptedModel(replies=[AIMessage(content='中' * 26000)])
+            model = ScriptedModel(replies=[AIMessage(content='中' * 26000), AIMessage(content='中' * 26000)])
             context = build_agent(model, demo_backend(), session=store).context
             messages = [AIMessage(content=OLD), HumanMessage(content='keep')]
             update = await context.abefore_model({'messages': messages}, None)
             assert 'messages' not in update
-            assert update['context_summary_attempts'] == 1
+            assert update['context_summary_attempts'] == 2
     asyncio.run(run())
 
 

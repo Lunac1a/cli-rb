@@ -34,8 +34,9 @@ def test_demo_is_explicit_and_disables_tracing(monkeypatch):
     result = CliRunner().invoke(app, ["demo"])
     assert result.exit_code == 0, result.output
     assert "模拟模型演示" in result.output
-    assert "模型请求工具" in result.output
-    assert "工具返回" in result.output
+    assert "模型请求工具" not in result.output
+    assert "正在阅读文件" in result.output
+    assert "工具返回" not in result.output
     import os
     assert os.environ["LANGSMITH_TRACING"] == "false"
 

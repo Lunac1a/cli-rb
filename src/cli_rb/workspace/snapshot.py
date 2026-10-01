@@ -11,7 +11,7 @@ from uuid import uuid4
 
 EXCLUDED = {
     ".git", ".cli-rb", ".venv", "venv", "node_modules", "__pycache__",
-    ".pytest_cache", ".ruff_cache", ".idea", "dist", "build", ".next",
+    ".pytest_cache", ".hypothesis", ".ruff_cache", ".idea", "dist", "build", ".next",
     ".ssh", ".aws", ".azure", ".kube", ".gnupg", "credentials", "secrets",
 }
 SECRET = re.compile(
@@ -62,7 +62,8 @@ def load_snapshot(directory: Path) -> Snapshot:
     return Snapshot(session, workspace.resolve(), manifest, mode, resumed=True)
 
 
-def create_snapshot(source: Path, sessions: Path, *, max_file_bytes=1024 * 1024) -> Snapshot:
+def create_snapshot(source: Path, sessions: Path, *, max_file_bytes=1024 * 1024,
+                    max_total_bytes=64 * 1024 * 1024, normalize_git_eol=False) -> Snapshot:
     source = source.resolve(strict=True)
     if not source.is_dir():
         raise ValueError("请选择 Git 仓库目录。")
@@ -77,13 +78,21 @@ def create_snapshot(source: Path, sessions: Path, *, max_file_bytes=1024 * 1024)
         capture_output=True, check=True, timeout=10,
     ).stdout.decode("utf-8").split("\0")
     entries = sorted(set(filter(None, entries)))
+    lf_files = set()
+    if normalize_git_eol:
+        eol = subprocess.run(['git', '-C', str(source), 'ls-files', '--eol', '-z'],
+                             capture_output=True, check=True, timeout=10).stdout.decode('utf-8')
+        for record in filter(None, eol.split('\0')):
+            info, name = record.split('\t', 1)
+            if info.split()[:2] == ['i/lf', 'w/crlf']:
+                lf_files.add(name)
     if len(entries) > 10000:
         raise ValueError("仓库超过 10000 个候选文件，本阶段不支持。")
     session = sessions.resolve() / uuid4().hex
     workspace = session / "workspace"
     workspace.mkdir(parents=True)
     manifest = {"source": str(source), "files": {}, "excluded": {}, "status": "preparing",
-                "max_file_bytes": max_file_bytes, "mode": "isolated"}
+                "max_file_bytes": max_file_bytes, "max_total_bytes": max_total_bytes, "mode": "isolated"}
     total = 0
     try:
         for name in entries:
@@ -119,9 +128,11 @@ def create_snapshot(source: Path, sessions: Path, *, max_file_bytes=1024 * 1024)
             if SECRET.search(content):
                 manifest["excluded"][name] = "recognized credential content"
                 continue
+            if name in lf_files:
+                content = content.replace(b'\r\n', b'\n')
             total += len(content)
-            if total > 64 * 1024 * 1024:
-                raise ValueError("工作副本超过 64 MiB，已停止准备。")
+            if total > max_total_bytes:
+                raise ValueError(f"工作副本超过 {max_total_bytes} 字节，已停止准备。")
             target = workspace.joinpath(*relative.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)

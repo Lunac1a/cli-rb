@@ -50,14 +50,16 @@ def verify_checkout(repo, task):
         raise ValueError('评测必须从无修改的基线开始。')
 
 
-async def run_task(task, repo, image, output, config, *, seconds=600):
+async def run_task(task, repo, image, output, config, *, seconds=600,
+                   max_total_bytes=64 * 1024 * 1024):
     disable_remote_tracing()
     verify_checkout(repo, task)
     output.mkdir(parents=True, exist_ok=False)
     docker, image = prepare_image(image)
     # Benchmark fixtures are part of the task environment, including large DICOM files.
-    # The overall 64 MiB snapshot limit remains; patch export uses the same file limit.
-    snapshot = create_snapshot(repo, output / 'sessions', max_file_bytes=64 * 1024 * 1024)
+    # The manifest carries the total budget to patch export and verification.
+    snapshot = create_snapshot(repo, output / 'sessions', max_file_bytes=64 * 1024 * 1024,
+                               max_total_bytes=max_total_bytes, normalize_git_eol=True)
     if any(reason.startswith('larger than') for reason in snapshot.manifest['excluded'].values()):
         raise ValueError('评测资源超过副本大小限制；不能用缺少资源的副本求解。')
     backend = BenchmarkBackend(snapshot, docker, image)

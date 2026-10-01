@@ -1,7 +1,7 @@
 """The framework owns the model/tool loop; presentation stays outside it."""
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+from langchain.agents.middleware import ToolCallLimitMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from dataclasses import dataclass
 import asyncio
@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Remo
 from cli_rb.workspace.tools import ReadBackend, make_read_tool, make_workspace_tools, make_coding_tools
 from cli_rb.runtime.prompt_loader import coding_prompt
 from cli_rb.runtime.planning import PlanningMiddleware, planning_prompt
+from cli_rb.runtime.model_recovery import ModelRequestRecovery, without_sdk_retries
 from cli_rb.quality.verification import CompletionMiddleware
 
 SYSTEM_PROMPT = """You are CLI Rb's read-only integration-check assistant.
@@ -45,6 +46,8 @@ class AgentRuntime:
     session: object = None
     context: object = None
     completion: object = None
+    graph_step_limit: int | None = None
+    requests: object = None
 
 
 class TaskTimeLimitExceeded(Exception):
@@ -69,13 +72,23 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
     if (type(task_timeout_seconds) not in (int, float)
             or not math.isfinite(task_timeout_seconds) or task_timeout_seconds <= 0):
         raise ValueError("任务时长必须为有限的正数。")
+    model = without_sdk_retries(model)
     tools = make_workspace_tools(backend) if workspace else [make_read_tool(backend)]
     prompt = WORKSPACE_PROMPT if workspace else SYSTEM_PROMPT
     if coding:
         tools = make_coding_tools(backend)
         prompt = coding_prompt(mode=backend.snapshot.mode, model_call_limit=model_call_limit,
                                tool_call_limit=tool_call_limit,
-                               task_timeout_seconds=task_timeout_seconds)
+                               task_timeout_seconds=task_timeout_seconds,
+                               execution_rules=getattr(backend, 'execution_rules', None))
+        if getattr(backend, 'execution_rules', None):
+            for tool in tools:
+                if tool.name in {'run_command', 'run_write_command', 'run_verification'}:
+                    tool.description = ('Run a local command subject to automatic approval policy and the execution boundaries in the system instructions. '
+                        'Use the host shell described in the system instructions. timeout_seconds: 1-60. '
+                        'For verification use kind=test for test runners, kind=check for assertion scripts; '
+                        'provide behavior_ids and assertion to associate checks. Inspect output and exit_code; '
+                        'zero exit alone does not prove correctness. Simple local tests and inspection can be automatic; pushes, destructive commands and unclassified commands ask the user. Never rewrite a denied or review-required operation to evade approval.')
     if session is not None:
         from cli_rb.runtime.history import make_history_tool
         tools.append(make_history_tool(session))
@@ -87,14 +100,20 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
         context = ContextMiddleware(model, prompt, [*tools, *(planning.tools if planning else [])],
                                     model_call_limit, session, policy=context_policy,
                                     prompt_suffix=planning_prompt if planning else None)
+    requests = ModelRequestRecovery(model_call_limit, session, reserve_final=coding)
     graph = create_agent(model=model, tools=tools, system_prompt=prompt, checkpointer=checkpointer, middleware=[
         *([planning] if planning else []),
         *([context] if context else []),
         *([completion] if completion else []),
-        ModelCallLimitMiddleware(run_limit=model_call_limit, exit_behavior="error"),
+        requests,
         ToolCallLimitMiddleware(run_limit=tool_call_limit, exit_behavior="error"),
     ])
-    return AgentRuntime(graph, model, prompt, model_call_limit, task_timeout_seconds, backend, session, context, completion)
+    # A model/tool cycle can visit every middleware node. Include one extra
+    # traversal for startup, finalization, or the budget hook rejecting a call.
+    # Model/tool/time middleware still enforce the actual work allowances.
+    graph_step_limit = len(graph.nodes) * (model_call_limit + 1)
+    return AgentRuntime(graph, model, prompt, model_call_limit, task_timeout_seconds,
+                        backend, session, context, completion, graph_step_limit, requests)
 
 
 def reply_status(message):
@@ -130,6 +149,8 @@ class TextDelta:
 @dataclass(frozen=True)
 class ContextUpdate:
     estimate: int
+    input_limit: int = 0
+    compacted: bool = False
 
 
 def stream_turn(agent, messages):
@@ -192,7 +213,9 @@ async def _astream_turn(agent, messages):
     """Display deltas are separate from authoritative, completed messages."""
     # The CLI appends yielded messages to its history; freeze the input before yielding.
     history = list(messages)
-    config = {"recursion_limit": 6 * agent.model_call_limit + 10, "callbacks": []}
+    config = {"callbacks": []}
+    if agent.graph_step_limit is not None:
+        config['recursion_limit'] = agent.graph_step_limit
     graph_input = history
     if agent.session:
         config.update(agent.session.config)
@@ -223,7 +246,8 @@ async def _astream_turn(agent, messages):
                     if node == 'ContextMiddleware.before_model':
                         if 'messages' in state:
                             model_history = [m for m in state['messages'] if not isinstance(m, RemoveMessage)]
-                            yield ContextUpdate(state['context_estimate'])
+                        if 'context_estimate' in state:
+                            yield ContextUpdate(state['context_estimate'], state.get('context_input_limit', 0), 'messages' in state)
                         continue
                     for message in state.get("messages", []):
                         # Coding final drafts remain internal until the completion hook reviews them.
@@ -254,16 +278,21 @@ async def _astream_turn(agent, messages):
     if agent.context:
         agent.context.check_size([*model_history, recovery_request], tools=False)
     try:
-        reply = await agent.model.ainvoke([
-            agent.context.system_message() if agent.context else SystemMessage(content=agent.prompt),
-            *model_history,
-            recovery_request,
-        ], config={"callbacks": []})
+        async def request_final(_):
+            return await agent.model.ainvoke([
+                agent.context.system_message() if agent.context else SystemMessage(content=agent.prompt),
+                *model_history,
+                recovery_request,
+            ], config={"callbacks": []})
+        reply = (await agent.requests.awrap_model_call(None, request_final)
+                 if agent.requests else await request_final(None))
         status = "recovered" if has_reply(reply) else "empty_or_tool_request"
         if not has_reply(reply):
             rejection = reply_status(reply)
             reply = AIMessage(content="", response_metadata={**reply.response_metadata,
                               'rejected_reply_status': rejection, 'rejected_reply_text': reply.text})
+    except ModelCallLimitExceededError:
+        raise
     except Exception as error:
         status = "request_failed"
         reply = AIMessage(content="", response_metadata={"error_type": type(error).__name__})

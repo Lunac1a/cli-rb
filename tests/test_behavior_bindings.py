@@ -77,3 +77,48 @@ def test_changed_requirement_can_reuse_actual_current_assertions_without_executi
     ledger.bind_verification('value', record['id'], nodes, 'existing selected assertions check type and value')
     assert ledger.assess()['behaviors'][0]['status'] == 'evidence_current'
     assert len(ledger.records()) == 1
+
+
+def test_declared_whole_run_needs_no_binding_or_second_execution(backend):
+    register(backend)
+    backend.outcomes = [success()]
+    receipt = json.loads(backend.run_verification(
+        'pytest', 'value', behavior_ids=['value'], assertion='value equals two'))
+    report = backend.verification.assess()
+    assert report['behaviors'][0]['status'] == 'evidence_current'
+    assert report['behaviors'][0]['evidence_ids'] == [receipt['id']]
+    assert not backend.verification.bindings()
+    assert len(backend.command_evidence) == 1
+
+
+def test_separate_bindings_preserve_core_and_compatibility_coverage(backend):
+    register(backend)
+    ledger = backend.verification
+    core = run(backend, success())
+    core_nodes = list(core['test_evidence']['nodes'])
+    ledger.bind_verification('value', core['id'], core_nodes, 'core contract')
+    other = run(backend, mixed())
+    ledger.bind_verification('value', other['id'], ['junit:test_a::value'], 'compatibility')
+    report = VerificationLedger(backend).assess()['behaviors'][0]
+    assert report['status'] == 'evidence_current'
+    assert set(report['bound_nodes']) == set(core_nodes + ['junit:test_a::value'])
+    assert report['evidence_ids'] == [core['id'], other['id']]
+    assert report['assertion_claims'] == ['core contract', 'compatibility']
+    # A later observation of the earlier core behavior must invalidate it,
+    # even though the most recent binding only selected compatibility.
+    run(backend, {'exit_code': 1, 'output':
+        core_nodes[0] + ' FAILED [100%]\n1 failed in 0.1s'})
+    assert ledger.assess()['behaviors'][0]['status'] == 'unverified'
+
+
+@pytest.mark.parametrize('result', [success(), {'exit_code': 0, 'output': 'assertions checked'}])
+def test_bound_command_accepts_both_success_receipts_and_retains_later_failure(backend, result):
+    register(backend)
+    ledger = backend.verification
+    backend.outcomes = [result]
+    receipt = json.loads(backend.run_verification('python check.py', 'value', kind='check'))
+    ledger.bind_verification('value', receipt['id'], [], 'value equals two')
+    assert ledger.assess()['behaviors'][0]['status'] == 'evidence_current'
+    backend.outcomes = [{'exit_code': 1, 'output': 'AssertionError'}]
+    backend.run_verification('python check.py', 'value', kind='check')
+    assert ledger.assess()['behaviors'][0]['status'] == 'unverified'

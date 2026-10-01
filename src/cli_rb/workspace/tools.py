@@ -136,7 +136,7 @@ def make_coding_tools(backend):
     def run_verification(command: str, scope: str, timeout_seconds: int = 60, kind: str = 'test',
                          behavior_ids: list[str] | None = None, assertion: str = '',
                          purpose: str = 'verify', expected_failure: str = '') -> str:
-        """Execute once with code-version evidence. Optionally link registered IDs via behavior_ids for whole-run coverage; prefer bind_verification after execution for specific nodes and describe the actual checked assertion, not just a test command. purpose=verify/regression checks current behavior; reproduce requires expected_failure text specified before execution and records a pre-fix failure. A later successful check of the same declared behavior links the reproduction without erasing history. Simple pytest commands automatically produce JUnit XML in container /tmp, preserving test selection and logs; complex commands fall back to text, unknown is NOT passing. kind=check records command success only for assertion scripts/build/lint. Read-only workspace and approval rules are unchanged. Reports cannot prove semantic coverage; inspect assertions before claiming a behavior is checked."""
+        """Execute once with code-version evidence. Pass behavior_ids and the actual assertion explanation to associate this execution directly with registered behaviors. A complete wholly passing receipt needs no later binding. Use bind_verification only for existing unlinked evidence or a relevant selection from a mixed receipt. purpose=verify/regression checks current behavior; reproduce requires expected_failure text specified before execution and records a pre-fix failure. A later successful check of the same declared behavior links the reproduction without erasing history. Simple pytest commands automatically produce JUnit XML in container /tmp, preserving test selection and logs; complex commands fall back to text, unknown is NOT passing. kind=check records command success only for assertion scripts/build/lint. Read-only workspace and approval rules are unchanged. Reports cannot prove semantic coverage; inspect assertions before claiming a behavior is checked."""
         return guarded(backend.run_verification, command, scope, timeout_seconds, kind,
                        behavior_ids, assertion, purpose, expected_failure)
 
@@ -151,10 +151,16 @@ def make_coding_tools(backend):
         return guarded(backend.verification.bind_verification, behavior_id, evidence_id, test_nodes, assertion)
 
     @tool
+    def replace_verification(old_id: str, new_id: str, old_nodes: list[str],
+                             new_nodes: list[str], reason: str) -> str:
+        """Explicitly replace renamed or revised test nodes WITHOUT rerunning. For a check script migrated to tests, old_nodes=[]; old and new runs must declare matching behavior contracts, and reason must explain coverage of the old failure. Inspect both old and new assertions first. Copy exact nodes from complete receipts; new evidence must be newer, successful and current. reason explains how new assertions preserve coverage. This records a model coverage claim, not proof; unrelated failures and raw history remain. Never use unrelated passing tests to retire a failure or bypass an execution error."""
+        return guarded(backend.verification.replace_verification, old_id, new_id, old_nodes, new_nodes, reason)
+
+    @tool
     def review_work() -> str:
-        """Inspect changed paths, Python syntax/test-definition risks, and stale/failed/missing verification evidence. Read-only: never runs tests or approves semantic correctness. Legitimate test renames may produce review warnings."""
+        """Inspect changed paths, Python syntax errors, advisory test-definition risks, and stale/failed/missing evidence. Read-only: never runs tests or approves semantic correctness. Test rename warnings remain visible without automatically blocking completion."""
         return guarded(backend.review_work)
 
     return make_workspace_tools(backend) + [create_file, edit_file, delete_file, run_command,
                                           run_write_command, show_changes, export_patch, read_tool_log,
-                                          *([register_behavior, run_verification, bind_verification, review_work] if hasattr(backend, 'verification') else [])]
+                                          *([register_behavior, run_verification, bind_verification, replace_verification, review_work] if hasattr(backend, 'verification') else [])]

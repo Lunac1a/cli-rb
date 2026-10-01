@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from difflib import get_close_matches
 import hashlib
 import json
 import re
@@ -13,7 +14,7 @@ from langchain.agents.middleware.types import AgentState, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 
 from cli_rb.workspace.patches import inventory, file_bytes
-from cli_rb.workspace.container_worker import python_edit_warnings
+from cli_rb.workspace.container_worker import python_edit_warnings, python_syntax_errors
 from cli_rb.quality.test_evidence import parse_test_evidence, resolve_evidence, evidence_summary
 
 
@@ -48,15 +49,16 @@ class VerificationLedger:
         self.turn_plan_count = 0
         self.binding_path = backend.snapshot.session / 'behavior-bindings.jsonl'
         self.turn_binding_count = 0
+        self.reconciliation_path = backend.snapshot.session / 'evidence-replacements.jsonl'
 
     def files(self):
         snapshot = self.backend.snapshot
         ignored = set(snapshot.manifest['excluded'])
-        if snapshot.mode == 'direct':
-            from cli_rb.workspace.live_workspace import ignored_paths
-            ignored |= ignored_paths(snapshot.workspace) - snapshot.manifest['files'].keys()
+        from cli_rb.workspace.ignore_rules import snapshot_ignored_paths
+        ignored |= snapshot_ignored_paths(snapshot)
         files = inventory(snapshot.workspace, ignored,
-                          max_file_bytes=snapshot.manifest.get('max_file_bytes', 1024 * 1024))
+                          max_file_bytes=snapshot.manifest.get('max_file_bytes', 1024 * 1024),
+                          max_total_bytes=snapshot.manifest.get('max_total_bytes', 64 * 1024 * 1024))
         return files
 
     def fingerprint(self, files=None):
@@ -146,6 +148,58 @@ class VerificationLedger:
     def records(self):
         return [json.loads(line) for line in self.path.read_text(encoding='utf-8').splitlines()] if self.path.exists() else []
 
+    def replace_verification(self, old_id, new_id, old_nodes, new_nodes, reason):
+        """Record an explicit coverage claim for renamed/replaced tests, never erase a run."""
+        with self.backend._lock:
+            records = {r['id']: r for r in self.records()[self.turn_record_count:]}
+            old, new = records.get(old_id), records.get(new_id)
+            if not old or not new or old_id == new_id or not reason.strip():
+                raise ValueError('Use distinct evidence IDs from this turn and explain the replacement assertions.')
+            if old.get('purpose') == 'reproduce' or new.get('purpose') == 'reproduce':
+                raise ValueError('Reproductions must be linked through their registered behavior contract.')
+            old_details, new_details = old.get('test_evidence', {}), new.get('test_evidence', {})
+            check_migration = old['kind'] == 'check' and not old_nodes
+            if check_migration:
+                contracts = old.get('behavior_contracts', {})
+                if (not contracts or not old.get('assertion') or old.get('timed_out')
+                        or old.get('before') != old.get('after') or old.get('exit_code') is None
+                        or any(new.get('behavior_contracts', {}).get(k) != v for k, v in contracts.items())):
+                    raise ValueError('Check migration requires a stable completed check with declared assertions and matching behavior contracts in the new test run.')
+            if (not new_nodes or not new_details.get('nodes_complete') or new['kind'] != 'test'
+                    or not check_migration and (not old_nodes or not old_details.get('nodes_complete') or old['kind'] != 'test')):
+                raise ValueError('Select exact old nodes and passing replacement nodes from complete test receipts.')
+            invalid = []
+            for side, selected, details in [('old', old_nodes, old_details), ('new', new_nodes, new_details)]:
+                available = [n for n, status in details.get('nodes', {}).items()
+                             if side == 'old' or status == 'passed']
+                for node in selected:
+                    if node not in available:
+                        invalid.append({'side': side, 'node': node,
+                                        'observed_status': details['nodes'].get(node, 'not_found'),
+                                        'candidates': get_close_matches(node, available, n=3) or available[:3]})
+            if invalid:
+                raise ValueError('Invalid test nodes: ' + json.dumps(invalid[:5], ensure_ascii=False) +
+                                 '. Copy exact IDs from the receipt; candidates are suggestions, not automatic replacements.')
+            current = self.fingerprint()
+            if new['before'] != current or new['after'] != current or new['outcome'] != 'passed':
+                raise ValueError('Replacement must be a successful test run on the current code.')
+            if list(records).index(new_id) <= list(records).index(old_id):
+                raise ValueError('Replacement evidence must be newer than the old run.')
+            link = {'old_id': old_id, 'new_id': new_id, 'old_nodes': sorted(set(old_nodes)),
+                    'new_nodes': sorted(set(new_nodes)), 'reason': reason, 'current': current,
+                    'check_migration': check_migration}
+            with self.reconciliation_path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(link, ensure_ascii=False) + '\n')
+            return json.dumps({**link, 'note': 'Coverage is your explicit claim; original results and unrelated failures remain.'})
+
+    def reconciliations(self, current, records):
+        if not self.reconciliation_path.exists():
+            return []
+        ids = {r['id'] for r in records}
+        return [link for line in self.reconciliation_path.read_text(encoding='utf-8').splitlines()
+                if (link := json.loads(line))['current'] == current
+                and link['old_id'] in ids and link['new_id'] in ids]
+
     def run(self, command, scope, timeout_seconds, kind='test', behavior_ids=None,
             assertion='', purpose='verify', expected_failure=''):
         if not scope.strip():
@@ -207,12 +261,17 @@ class VerificationLedger:
             current = self.fingerprint(files)
             records = self.records()
             requirements = self.requirements()
-            latest, replacements = resolve_evidence(records[self.turn_record_count:])
+            turn_records = records[self.turn_record_count:]
+            latest, replacements = resolve_evidence(turn_records, self.reconciliations(current, turn_records))
             issues = []
             if current == self.turn_start and len(records) == self.turn_record_count and not requirements:
                 return {'status': 'not_applicable', 'current': current, 'issues': [], 'evidence_ids': []}
             if current != self.turn_start and not latest:
                 issues.append('Current changes have no evidence saved by run_verification.')
+            elif current != self.turn_start and not any(
+                    item['record']['before'] == item['record']['after'] == current
+                    and item['record']['outcome'] in {'passed', 'command_succeeded'} for item in latest):
+                issues.append('Current changes have no current successful verification.')
             behaviors = []
             for key, requirement in requirements.items():
                 matches = [r for r in records[self.turn_record_count:]
@@ -227,32 +286,37 @@ class VerificationLedger:
                               all(status == 'passed' for status in details['nodes'].values()))
                 bindings = [b for b in self.bindings()[self.turn_binding_count:]
                             if b['behavior_id'] == key and b['contract'] == digest(requirement)]
+                # A correction for the same receipt replaces its selection; separate
+                # receipts contribute together instead of erasing earlier coverage.
+                selected = {b['evidence_id']: b for b in bindings}
                 binding = bindings[-1] if bindings else None
                 observed = {}
-                if binding:
+                if selected:
+                    ok = bool(requirement['affected_paths'])
+                    for evidence_id, selection in selected.items():
+                        source = next(r for r in records if r['id'] == evidence_id)
+                        if source['kind'] == 'test':
+                            for candidate in turn_records:
+                                details = candidate.get('test_evidence', {})
+                                for node in selection['test_nodes']:
+                                    if node in details.get('nodes', {}):
+                                        observed[node] = (candidate, details['nodes'][node])
+                            ok = ok and all(node in observed and observed[node][1] == 'passed'
+                                            and observed[node][0]['before'] == observed[node][0]['after'] == current
+                                            and observed[node][0].get('test_evidence', {}).get('nodes_complete')
+                                            and not observed[node][0].get('timed_out')
+                                            for node in selection['test_nodes'])
+                        else:
+                            current_check = next((r for r in reversed(turn_records)
+                                                  if r['kind'] == 'check' and r['command'] == source['command']), source)
+                            ok = ok and current_check['before'] == current_check['after'] == current and current_check['outcome'] in {'passed', 'command_succeeded'}
                     record = next(r for r in records if r['id'] == binding['evidence_id'])
-                    ok = bool(requirement['affected_paths'] and record['before'] == record['after'] == current)
-                    if record['kind'] == 'test':
-                        # Later observations override earlier passes even without a new
-                        # behavior binding. Unselected failures remain global issues.
-                        for candidate in records[self.turn_record_count:]:
-                            details = candidate.get('test_evidence', {})
-                            for node in binding['test_nodes']:
-                                if node in details.get('nodes', {}):
-                                    observed[node] = (candidate, details['nodes'][node])
-                        ok = ok and all(node in observed and observed[node][1] == 'passed'
-                                        and observed[node][0]['before'] == observed[node][0]['after'] == current
-                                        and observed[node][0].get('test_evidence', {}).get('nodes_complete')
-                                        and not observed[node][0].get('timed_out')
-                                        for node in binding['test_nodes'])
-                    else:
-                        current_check = next((r for r in reversed(records[self.turn_record_count:])
-                                              if r['kind'] == 'check' and r['command'] == record['command']), record)
-                        ok = ok and current_check['before'] == current_check['after'] == current and current_check['outcome'] == 'command_succeeded'
                 behaviors.append({**requirement, 'status': 'evidence_current' if ok else 'unverified',
                                   'evidence_id': record['id'] if record else None,
+                                  'evidence_ids': list(selected) if selected else [record['id']] if record else [],
                                   'assertion_claim': binding['assertion'] if binding else record.get('assertion') if record else None,
-                                  'bound_nodes': binding['test_nodes'] if binding else None,
+                                  'assertion_claims': [b['assertion'] for b in selected.values()],
+                                  'bound_nodes': sorted({n for b in selected.values() for n in b['test_nodes']}) if selected else None,
                                   'node_evidence': {n: r['id'] for n, (r, _) in observed.items()}})
                 if not ok:
                     reason = 'Affected paths still need investigation' if not requirement['affected_paths'] else 'No current complete passing evidence'
@@ -266,14 +330,18 @@ class VerificationLedger:
                 outcome = record['outcome']
                 if nodes is not None:
                     outcome = ('failed' if any(s in {'failed', 'errors'} for s in nodes.values()) else
-                               'passed' if 'passed' in nodes.values() else 'unknown')
+                               'passed' if 'passed' in nodes.values() else
+                               'expected_failure' if set(nodes.values()) == {'xfailed'} else 'unknown')
                 if record.get('purpose') == 'reproduce':
                     issues.append(f"{record['id']}: pre-fix reproduction is not yet linked to current passing evidence.")
                 evidence.append({**record, 'current': is_current, 'remaining_nodes': nodes,
                                  'remaining_outcome': outcome})
-                if not is_current:
+                historical_success = (not is_current and record['kind'] == 'check'
+                                      and outcome in {'passed', 'command_succeeded'}
+                                      and record['before'] == record['after'] and not record.get('timed_out'))
+                if not is_current and not historical_success:
                     issues.append(f"{record['id']}: verification does not match current code, or code changed during execution.")
-                elif outcome not in {'passed', 'command_succeeded'}:
+                elif outcome not in {'passed', 'command_succeeded', 'expected_failure'}:
                     issues.append(f"{record['id']}: remaining outcome is {outcome}; it is not passing evidence.")
             return {'status': 'needs_attention' if issues else ('evidence_current' if latest else 'not_applicable'),
                     'current': current, 'issues': issues,
@@ -289,7 +357,7 @@ class VerificationLedger:
         snapshot = self.backend.snapshot
         current = self.files() if files is None else files
         original = snapshot.manifest['files']
-        changes, risks = [], []
+        changes, risks, errors = [], [], []
         for name in sorted(original.keys() | current.keys()):
             data = current.get(name)
             if data is not None and hashlib.sha256(data).hexdigest() == original.get(name):
@@ -297,8 +365,11 @@ class VerificationLedger:
             changes.append(name)
             if name.endswith('.py'):
                 before = file_bytes(self.backend.patches.baseline, name, self.backend.patches.max_file_bytes) if name in original else None
-                risks.extend(python_edit_warnings(name, before, data))
-        return {'changed_files': changes, 'risks': risks}
+                syntax = python_syntax_errors(name, data)
+                errors.extend(syntax)
+                if not syntax:
+                    risks.extend(python_edit_warnings(name, before, data))
+        return {'changed_files': changes, 'risks': risks, 'syntax_errors': errors}
 
     def review(self):
         with self.backend._lock:
@@ -306,7 +377,7 @@ class VerificationLedger:
             report = self.assess(require_behaviors=True, files=files)
             if report['status'] != 'not_applicable':
                 report.update(self.review_changes(files=files))
-                report['issues'].extend(report['risks'])
+                report['issues'].extend(report['syntax_errors'])
                 if report['issues']:
                     report.update(status='needs_attention', completion_status='partial_unverified')
             return report
@@ -351,7 +422,8 @@ class CompletionMiddleware(AgentMiddleware):
                      '\nProgram verification summary:\n' + evidence_summary(report) +
                      '\nWhen necessary and within budget, add verification with run_verification; otherwise explicitly report incomplete or unverified work. '
                      'Do not delete tests or narrow requirements merely to clear this message. Unrecognized test output remains unknown. '
-                     'Do not rerun unchanged checks for plan wording updates. A suspected environment or pre-existing failure remains unclassified unless a comparable pre-patch run demonstrates it; report that uncertainty.')],
+                     'Do not rerun unchanged checks for plan wording updates. A suspected environment or pre-existing failure remains unclassified unless a comparable pre-patch run demonstrates it; report that uncertainty. '
+                     'Your earlier draft may not have been displayed. Return a complete standalone final answer, including requested usage commands and deliverables, not a correction referring to a previous message. Explain concrete test failures or limitations in plain language without internal evidence IDs or bookkeeping terminology.')],
                     'completion_feedback_count': 1, 'jump_to': 'model'}
         reply = last.model_copy(deep=True)
         reply.response_metadata['completion_check'] = report

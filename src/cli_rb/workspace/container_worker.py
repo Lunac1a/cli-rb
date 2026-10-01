@@ -12,14 +12,23 @@ import sys
 import tempfile
 
 
+def python_syntax_errors(name, after):
+    if name.endswith('.py') and after is not None:
+        try:
+            ast.parse(after)
+        except (SyntaxError, ValueError):
+            return [f'{name}：修改后的Python语法无法解析。']
+    return []
+
+
 def python_edit_warnings(name, before, after):
     """Advisory diagnostics, never reject intentional refactors or run source code."""
     if not name.endswith('.py'):
         return []
-    try:
-        new = ast.parse(after) if after is not None else None
-    except (SyntaxError, ValueError):
-        return [f'{name}：修改后的Python语法无法解析。']
+    errors = python_syntax_errors(name, after)
+    if errors:
+        return errors
+    new = ast.parse(after) if after is not None else None
     if before is None or 'test' not in name.lower():
         return []
     try:
