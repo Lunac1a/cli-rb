@@ -70,6 +70,10 @@ def test_timeout_removes_only_its_container_without_retry(tmp_path, monkeypatch)
     name = calls[0][calls[0].index("--name") + 1]
     assert calls[2] == calls[3] == ["docker", "rm", "--force", name]
     assert list((tmp_path / "tool-logs").glob("*-interrupted.json"))
+    record = json.loads(next((tmp_path / 'tool-logs').glob('*-interrupted.json')).read_text())
+    assert record['phase'] == 'start_and_execute' and record['timeout_seconds'] == 30
+    assert record['create_seconds'] >= 0
+    assert record['worker_vs_startup_time'] == 'unknown'
 
 
 def test_binary_and_long_output_are_explicit(tmp_path):
@@ -88,7 +92,7 @@ def test_code_pages_are_contiguous_with_exact_next_line(tmp_path):
     while True:
         page = execute(tmp_path, {'action': 'read', 'args': {
             'path': 'code.py', 'start_line': start, 'max_lines': 200}})
-        assert len(page) < 6100
+        assert len(page) < 12100
         numbered = [line for line in page.splitlines() if re.match(r'^\d+: ', line)]
         collected.extend(numbered)
         next_line = re.search(r'从第 (\d+) 行继续读取', page)

@@ -47,8 +47,10 @@ def local_httpbin(docker, image):
 
 def run_scoring_script(docker, container, script, output, *,
                        setup_seconds=1800, test_seconds=300,
-                       use_preinstalled_build_dependencies=False):
+                       use_preinstalled_build_dependencies=False, build_jobs=2):
     """Use an already created scorer container. Never retry a stage or a solver."""
+    if build_jobs < 1:
+        raise ValueError('build_jobs must be positive')
     marker = "git apply -v - <<"
     setup, separator, tests = script.partition(marker)
     if not separator:
@@ -74,7 +76,12 @@ def run_scoring_script(docker, container, script, output, *,
                        check=True, capture_output=True, timeout=30)
         with (output / (name + '.log')).open('wb') as log:
             try:
-                process = subprocess.run([docker, 'exec', container, '/bin/bash', '/stage.sh'],
+                process = subprocess.run([docker, 'exec',
+                                         '-e', f'LOKY_MAX_CPU_COUNT={build_jobs}',
+                                         '-e', f'SKLEARN_BUILD_PARALLEL={build_jobs}',
+                                         '-e', 'OPENBLAS_NUM_THREADS=1',
+                                         '-e', 'OMP_NUM_THREADS=1',
+                                         container, '/bin/bash', '/stage.sh'],
                                          stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
             except subprocess.TimeoutExpired:
                 return {**results, 'state': 'evaluation_error', 'phase': name, 'reason': 'timeout'}

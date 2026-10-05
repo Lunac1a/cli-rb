@@ -34,7 +34,7 @@ def test_plan_survives_history_replacement_reopen_and_confirmed_recovery(tmp_pat
         model = ScriptedModel(replies=[plan_call(todos), AIMessage(content='验证尚未完成')])
         with SessionStore(tmp_path, create=True) as store:
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path/'checkpoints.sqlite')) as saver:
-                agent = build_agent(model, backend(), coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend(), coding=True, harness='full', session=store, checkpointer=saver)
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='调查并修复问题')])]
                 assert any(isinstance(e, ToolMessage) and e.name == 'write_todos' for e in events)
                 assert 'ORCHID-731' in model.seen[-1][0].text
@@ -49,7 +49,7 @@ def test_plan_survives_history_replacement_reopen_and_confirmed_recovery(tmp_pat
         with SessionStore(tmp_path) as store:
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path/'checkpoints.sqlite')) as saver:
                 model = ScriptedModel(replies=[request('README.md', 'pending'), AIMessage(content='仍需验证')])
-                agent = build_agent(model, backend(), coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend(), coding=True, harness='full', session=store, checkpointer=saver)
                 await store.begin(agent)
                 await agent.graph.ainvoke({'messages': [HumanMessage(content='继续调查')]},
                                          store.config, interrupt_before=['tools'])
@@ -71,7 +71,7 @@ def test_planning_counts_against_tool_budget_and_works_without_session():
     todos = [{'content': '先定位根因', 'status': 'in_progress'}]
     model = ScriptedModel(replies=[plan_call(todos), request('README.md', 'over-budget')])
     with pytest.raises(ToolCallLimitExceededError):
-        list(stream_turn(build_agent(model, backend(), coding=True, tool_call_limit=1),
+        list(stream_turn(build_agent(model, backend(), coding=True, harness='full', tool_call_limit=1),
                          [HumanMessage(content='修复问题')]))
     assert '先定位根因' in model.seen[-1][0].text
 
@@ -80,7 +80,7 @@ def test_oversized_persisted_plan_cannot_bypass_input_budget(tmp_path):
     async def run():
         model = ScriptedModel(replies=[])
         with SessionStore(tmp_path, create=True) as store:
-            agent = build_agent(model, backend(), coding=True, session=store)
+            agent = build_agent(model, backend(), coding=True, harness='full', session=store)
             with pytest.raises(ContextLimitExceeded):
                 await agent.context.abefore_model({
                     'messages': [HumanMessage(content='继续')],

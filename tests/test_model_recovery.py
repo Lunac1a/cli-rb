@@ -203,7 +203,7 @@ def test_persistent_edit_survives_recovery_or_exhaustion(backend, recover):
         directory = backend.snapshot.session
         with SessionStore(directory, create=True) as store:
             async with AsyncSqliteSaver.from_conn_string(str(directory/'checkpoints.sqlite')) as saver:
-                agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend, coding=True, harness='full', session=store, checkpointer=saver)
                 agent.requests.retry.initial_delay = 0
                 async def run_turn():
                     return [e async for e in astream_turn(agent, [HumanMessage(content='Change value to 2')])]

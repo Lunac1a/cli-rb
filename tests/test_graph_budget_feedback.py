@@ -33,7 +33,7 @@ def test_full_persistent_coding_graph_reaches_real_budget(backend, mode):
         session = backend.snapshot.session
         with SessionStore(session, create=True) as store:
             async with AsyncSqliteSaver.from_conn_string(str(session/'checkpoints.sqlite')) as saver:
-                agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver,
+                agent = build_agent(model, backend, coding=True, harness='full', session=store, checkpointer=saver,
                                     model_call_limit=25, tool_call_limit=21 if mode == 'tool_limit' else 50)
                 if mode == 'legacy_limit':
                     agent.graph_step_limit = 160

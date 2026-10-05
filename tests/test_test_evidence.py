@@ -94,7 +94,7 @@ def test_final_program_summary_uses_counts_without_extra_model_calls(backend):
     backend.outcomes = [receipt('Ran 11 tests in 0.1s\nOK (skipped=1)')]
     model = ScriptedModel(replies=[call('run_verification', command='python tests.py', scope='checks'),
                                   AIMessage(content='已完成修改。')])
-    events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='验证')]))
+    events = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='验证')]))
     assert len(model.seen) == 2
     assert '通过 10、跳过 1' in events[-1].text
     assert '实际节点未完整识别' in events[-1].text

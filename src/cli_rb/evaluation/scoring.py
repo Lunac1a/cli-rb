@@ -35,6 +35,22 @@ def evidence_coverage(expected, observed, log_ok=True):
             'observed_expected': len(set(expected) & set(observed)), 'missing': missing}
 
 
+def annotate_report(report, expected, observed, log_ok, raw):
+    """Keep diagnostics separate from failures of the required official tests."""
+    coverage = evidence_coverage(expected, observed, log_ok)
+    diagnostics = infrastructure_errors(raw)
+    resolved = report['resolved']
+    # Tests may intentionally capture network errors and still pass (pytest pastebin).
+    # Do not let that text override complete, successful official evidence.
+    problems = diagnostics if not (coverage['valid'] and resolved is True) else []
+    report.update(evidence_coverage=coverage, infrastructure_errors=problems,
+                  infrastructure_diagnostics=diagnostics, raw_official_resolved=resolved)
+    report['evaluation_status'] = 'evaluation_error' if not coverage['valid'] or problems else 'graded'
+    if report['evaluation_status'] == 'evaluation_error':
+        report['resolved'] = None
+    return report
+
+
 def main():
     from swebench.harness.test_spec.test_spec import make_test_spec
     from swebench.harness.grading import get_eval_report, get_logs_eval
@@ -62,22 +78,14 @@ def main():
             raise ValueError('Prediction instance ID mismatch')
         raw = args.test_log.read_text(encoding='utf-8')
         normalized = normalize_test_log(raw, row['repo'])
-        problems = infrastructure_errors(raw)
         with TemporaryDirectory() as directory:
             parser_input = Path(directory) / args.test_log.name
             parser_input.write_text(normalized, encoding='utf-8')
             report = get_eval_report(spec, prediction, parser_input, include_tests_status=True)
             observed, log_ok = get_logs_eval(spec, str(parser_input))
-        coverage = evidence_coverage([*spec.FAIL_TO_PASS, *spec.PASS_TO_PASS], observed, log_ok)
-        report[args.instance_id]['evidence_coverage'] = coverage
-        report[args.instance_id]['infrastructure_errors'] = problems
+        annotate_report(report[args.instance_id], [*spec.FAIL_TO_PASS, *spec.PASS_TO_PASS],
+                        observed, log_ok, raw)
         report[args.instance_id]['log_normalized'] = normalized != raw
-        if not coverage['valid'] or problems:
-            report[args.instance_id]['raw_official_resolved'] = report[args.instance_id]['resolved']
-            report[args.instance_id]['resolved'] = None
-            report[args.instance_id]['evaluation_status'] = 'evaluation_error'
-        else:
-            report[args.instance_id]['evaluation_status'] = 'graded'
         if args.environment_manifest:
             report[args.instance_id]['evaluation_environment'] = json.loads(
                 args.environment_manifest.read_text(encoding='utf-8'))

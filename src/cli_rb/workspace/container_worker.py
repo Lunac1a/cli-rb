@@ -4,12 +4,29 @@ import json
 import fnmatch
 import ast
 import os
+import re
 from pathlib import Path, PurePosixPath
 import signal
 import shlex
 import subprocess
 import sys
 import tempfile
+import shutil
+from importlib.machinery import PathFinder
+
+
+def environment_facts(root, protected=()):
+    """Inspect names and package specs without running commands or importing projects."""
+    command_path = os.environ.get('CLI_RB_COMMAND_PATH', os.environ.get('PATH', ''))
+    commands = {name: shutil.which(name, path=command_path) is not None
+                for name in ('git', 'rg', 'apply_patch', 'python')}
+    python = shutil.which('python', path=command_path)
+    same_python = bool(python and Path(python).resolve() == Path(sys.executable).resolve())
+    return {'scope': 'container command PATH at turn start',
+            'git_metadata_visible': '.git' not in protected and (root / '.git').exists(),
+            'commands': commands,
+            'pytest_in_command_python': PathFinder.find_spec('pytest') is not None if same_python else None,
+            'python_package_scope': 'installed interpreter paths; project-local modules and later PATH changes not checked'}
 
 
 def python_syntax_errors(name, after):
@@ -73,6 +90,8 @@ def execute_command(root, args):
         report_path = pytest_report_path(command)
         if report_path:
             command += ' --junitxml=' + shlex.quote(str(report_path))
+        elif django_verbose_command(command):
+            command += ' --verbosity=2'
 
     def limits():
         resource.setrlimit(resource.RLIMIT_FSIZE, (8 * 1024 * 1024, 8 * 1024 * 1024))
@@ -111,7 +130,21 @@ def execute_command(root, args):
     return json.dumps({"exit_code": process.returncode, "timed_out": timed_out,
                        "output": captured, "output_limit_bytes": 8 * 1024 * 1024,
                        "executed_command": command, "junit_xml": report, "report_error": report_error,
-                       "shell": "bash", "pipefail": True}, ensure_ascii=False)
+                       "shell": "/bin/bash", "pipefail": True,
+                       "started": True, "initial_cwd": str(cwd)}, ensure_ascii=False)
+
+
+def django_verbose_command(command):
+    """Collect actual identities from a simple Django test invocation."""
+    if any(char in command for char in '\n\r;&|<>`$#'):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return (len(words) >= 3 and words[0] in {'python', 'python3'}
+            and words[1] == 'tests/runtests.py'
+            and all(re.fullmatch(r'\w+(?:\.\w+)*', word) for word in words[2:]))
 
 
 def pytest_report_path(command):
@@ -162,6 +195,8 @@ def execute(root, request, *, writable=False):
     protected = request.get("protected_paths", [])
     if any(relative == p or relative.startswith(p + "/") for p in protected):
         raise ValueError("该路径受保护，工具不能访问。")
+    if action == 'environment':
+        return json.dumps(environment_facts(root, protected))
     if action in {"create", "edit", "delete", "command"}:
         if not writable:
             raise ValueError("当前后端为只读模式。")
@@ -208,13 +243,13 @@ def execute(root, request, *, writable=False):
         return "已更新工作区文件；尚未验证。" + ('\n' + '\n'.join(warnings) if warnings else '')
     if action == "read":
         start = integer(args.get("start_line", 1), 1, 1000000)
-        count = integer(args.get("max_lines", 80), 1, 200)
+        count = integer(args.get("max_lines", 80), 1, 400)
         lines = text_file(path).splitlines()
         end = start - 1
         page, size = [], 0
         for i, line in enumerate(lines[start - 1:start - 1 + count], start):
             row = f"{i}: {line[:2000]}" + (" [该行超过 2000 字符，已截断]" if len(line) > 2000 else "")
-            if page and size + len(row) + 1 > 6000:
+            if page and size + len(row) + 1 > 12000:
                 break
             page.append(row)
             size += len(row) + 1
@@ -239,16 +274,23 @@ def execute(root, request, *, writable=False):
     elif not path.is_dir():
         raise NotADirectoryError("目录不存在。")
     else:
-        def walk_files():
-            for directory, dirs, names in os.walk(path, followlinks=False):
-                def allowed(p):
-                    relative = p.relative_to(root).as_posix()
-                    return not p.is_symlink() and not any(relative == b or relative.startswith(b + '/') for b in protected)
-                dirs[:] = sorted(d for d in dirs if allowed(Path(directory) / d))
-                for name in sorted(names):
-                    p = Path(directory) / name
-                    if allowed(p) and p.is_file():
-                        yield p
+        def walk_files(directory=path):
+            # DirEntry reuses metadata obtained by directory enumeration instead of
+            # issuing separate Path.is_symlink/is_file requests over the bind mount.
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
+            directories = []
+            for entry in entries:
+                p = Path(entry.path)
+                relative = p.relative_to(root).as_posix()
+                if entry.is_symlink() or any(relative == b or relative.startswith(b + '/') for b in protected):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    directories.append(p)
+                elif entry.is_file(follow_symlinks=False):
+                    yield p
+            for directory in directories:
+                yield from walk_files(directory)
         files = walk_files()
     offset = integer(args.get("offset", 0), 0, 1000000)
     limit = integer(args.get("limit", 50), 1, 100)

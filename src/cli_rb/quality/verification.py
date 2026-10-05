@@ -16,6 +16,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from cli_rb.workspace.patches import inventory, file_bytes
 from cli_rb.workspace.container_worker import python_edit_warnings, python_syntax_errors
 from cli_rb.quality.test_evidence import parse_test_evidence, resolve_evidence, evidence_summary
+from cli_rb.workspace.command_feedback import command_feedback
+from cli_rb.quality.evidence_lifecycle import startup_failure, resolved_startups
 
 
 def digest(files):
@@ -23,15 +25,18 @@ def digest(files):
 
 
 def parse_test_outcome(result):
-    """Recognize pytest/unittest summaries, not arbitrary zero-exit commands."""
+    """Recognize test-runner summaries, not arbitrary zero-exit commands."""
     if result.get('timed_out') or result.get('exit_code') != 0:
         return 'failed'
     output = re.sub(r'\x1b\[[0-9;]*m', '', result.get('output', ''))
     if re.search(r'\b[1-9]\d* (?:failed|errors?)\b|^FAILED\b|^ERROR\b', output, re.M):
         return 'failed'
-    counts = parse_test_evidence(result)['counts']
+    evidence = parse_test_evidence(result)
+    counts = evidence['counts']
     if counts:
         if counts['failed'] or counts['errors']:
+            return 'failed'
+        if evidence['framework'] == 'sympy' and counts['xpassed']:
             return 'failed'
         if counts['passed']:
             return 'passed'
@@ -221,6 +226,7 @@ class VerificationLedger:
                       'purpose': purpose, 'assertion': assertion, 'expected_failure': expected_failure,
                       'behavior_contracts': {key: digest(requirements[key]) for key in behavior_ids}}
             count = len(self.backend.command_evidence)
+            feedback = None
             try:
                 self.backend.verification_command(command, timeout_seconds, kind == 'test')
                 # Read the full host-owned log, even when the model-facing output is truncated.
@@ -230,7 +236,10 @@ class VerificationLedger:
                     raw = (self.backend.logs / (entry['log_id'] + '.txt')).read_text(encoding='utf-8')
                     try:
                         result = json.loads(raw)
+                        feedback = json.loads(command_feedback(raw, entry['log_id']))
                         details = parse_test_evidence(result)
+                        if kind == 'test':
+                            record['startup_failure'] = startup_failure(command, result)
                         outcome = parse_test_outcome(result)
                         if details.get('source') == 'junit':
                             outcome = ('passed' if result.get('exit_code') == 0 and not result.get('timed_out')
@@ -253,7 +262,7 @@ class VerificationLedger:
                 with self.path.open('a', encoding='utf-8') as stream:
                     stream.write(json.dumps(record, ensure_ascii=False) + '\n')
             _, replacements = resolve_evidence(self.records()[self.turn_record_count:])
-            return json.dumps({**record, 'replacements': [item for item in replacements
+            return json.dumps({**record, 'command_result': feedback, 'replacements': [item for item in replacements
                                if item['new_id'] == record['id']]}, ensure_ascii=False)
 
     def assess(self, require_behaviors=False, *, files=None):
@@ -262,7 +271,9 @@ class VerificationLedger:
             records = self.records()
             requirements = self.requirements()
             turn_records = records[self.turn_record_count:]
-            latest, replacements = resolve_evidence(turn_records, self.reconciliations(current, turn_records))
+            active_records, startup_links = resolved_startups(turn_records, current)
+            latest, replacements = resolve_evidence(active_records, self.reconciliations(current, active_records))
+            replacements.extend(startup_links)
             issues = []
             if current == self.turn_start and len(records) == self.turn_record_count and not requirements:
                 return {'status': 'not_applicable', 'current': current, 'issues': [], 'evidence_ids': []}
@@ -274,7 +285,7 @@ class VerificationLedger:
                 issues.append('Current changes have no current successful verification.')
             behaviors = []
             for key, requirement in requirements.items():
-                matches = [r for r in records[self.turn_record_count:]
+                matches = [r for r in active_records
                            if r.get('purpose') != 'reproduce' and
                            r.get('behavior_contracts', {}).get(key) == digest(requirement)]
                 record = matches[-1] if matches else None
@@ -413,7 +424,13 @@ class CompletionMiddleware(AgentMiddleware):
                       'evidence_ids': []}
         feedback = (report['issues'] and not state.get('completion_feedback_count', 0)
                     and state.get('run_model_call_count', 0) < self.model_call_limit)
-        record = {**report, 'feedback_sent': bool(feedback)}
+        record = {**report, 'feedback_sent': bool(feedback),
+                  'feedback_decision': ('sent' if feedback else
+                                        'no_issues' if not report['issues'] else
+                                        'feedback_already_used' if state.get('completion_feedback_count', 0) else
+                                        'model_call_limit'),
+                  'model_calls_at_check': state.get('run_model_call_count'),
+                  'model_call_limit': self.model_call_limit}
         with (self.backend.snapshot.session / 'completion-checks.jsonl').open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + '\n')
         if feedback:

@@ -43,7 +43,7 @@ class DockerCodingBackend(DockerReadBackend):
             if not needs_review and direct and action == "delete" and args["path"] not in self.created_paths:
                 if not self.approve or not self.approve(f"删除已有文件：{args['path']}"):
                     return "授权未获得，删除未执行。不要绕过此决定。"
-            self._mount_writable = not (direct and action == "command" and not approved_write)
+            self._mount_writable = action != 'environment' and not (direct and action == "command" and not approved_write)
             try:
                 result = super()._call(action, args)
                 if action == "create" and "已更新" in result:

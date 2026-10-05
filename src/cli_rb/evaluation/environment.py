@@ -12,6 +12,42 @@ import subprocess
 from cli_rb.workspace.docker_backend import prepare_image
 
 
+def build_scoring_environment(base_ref, requirements, output, *, timeout=600):
+    """Prepare explicitly pinned build tools before spending any solver budget.
+
+    Network access is limited to image preparation. Runtime packages are not
+    implicitly upgraded; callers specify every added/changed distribution and
+    must preflight the official setup/tests before accepting the new image.
+    """
+    if '@sha256:' not in base_ref:
+        raise ValueError('Use the immutable registry digest of the official image')
+    if not requirements or any('==' not in item or '\n' in item for item in requirements):
+        raise ValueError('Explicitly pinned build requirements are required')
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    (output / 'requirements.txt').write_text('\n'.join(requirements) + '\n', encoding='utf-8')
+    (output / 'Dockerfile').write_text(
+        f'FROM {base_ref}\nCOPY requirements.txt /tmp/cli-rb-build-requirements.txt\n'
+        'RUN /opt/miniconda3/envs/testbed/bin/python -m pip install --no-deps '
+        '-r /tmp/cli-rb-build-requirements.txt\n'
+        'RUN /opt/miniconda3/envs/testbed/bin/python -m pip freeze '
+        '> /opt/cli-rb-scoring-packages.txt\n'
+        'LABEL cli-rb.evaluation-variant="prepared-build-tools"\n', encoding='utf-8')
+    with (output / 'build.log').open('wb') as log:
+        subprocess.run(['docker', 'build', '--iidfile', str(output / 'image-id.txt'), str(output)],
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=timeout)
+    image_id = (output / 'image-id.txt').read_text().strip()
+    packages = subprocess.run(['docker', 'run', '--rm', '--network=none', image_id,
+                               'cat', '/opt/cli-rb-scoring-packages.txt'],
+                              capture_output=True, check=True, timeout=30).stdout
+    (output / 'packages.txt').write_bytes(packages)
+    manifest = {'evaluation_variant': 'prepared-build-tools', 'base_image_ref': base_ref,
+                'scoring_image_id': image_id, 'build_requirements': requirements,
+                'preflight': 'not_run', 'official_environment_unchanged': False}
+    (output / 'environment.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+    return manifest
+
+
 def build_legacy_environment(base_image, tag_prefix, output):
     docker, base_id = prepare_image(base_image)
     digests = json.loads(subprocess.run(

@@ -29,7 +29,7 @@ def test_unknown_paths_are_valid_initial_plan_but_not_verified_completion(backen
 def test_empty_required_plan_field_returns_tool_error_without_aborting(backend):
     invalid = call('register_behavior', behavior_id='', expected='behavior', assertion='check it', affected_paths=[])
     model = ScriptedModel(replies=[invalid, AIMessage(content='计划尚未登记，未修改代码')])
-    events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='调查')]))
+    events = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='调查')]))
     assert len(model.seen) == 2
     assert any('工具错误' in event.text for event in events)
     assert events[-1].text == '计划尚未登记，未修改代码'
@@ -145,7 +145,7 @@ def test_progress_and_exact_node_binding_complete_without_reexecution(backend, m
         call('write_todos', todos=[{'content': 'checked', 'status': 'completed'}]),
         AIMessage(content='检查结束'),
     ])
-    events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='检查')]))
+    events = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='检查')]))
     assert events[-1].response_metadata['completion_check']['behaviors'][0]['status'] == 'evidence_current'
     assert len(backend.verification.records()) == 1
     assert len(backend.verification.plans()) == 1
@@ -180,7 +180,7 @@ def test_other_behavior_does_not_resolve_reproduction(backend):
 
 def test_program_status_leads_final_reply_even_when_model_claims_done(backend):
     model = ScriptedModel(replies=[behavior_plan(), AIMessage(content='全部完成'), AIMessage(content='仍然全部完成')])
-    events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='检查')]))
+    events = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='检查')]))
     assert len(model.seen) == 3
     assert events[-1].text.startswith('[完成状态] 部分完成')
     assert events[-1].response_metadata['completion_check']['behaviors'][0]['status'] == 'unverified'

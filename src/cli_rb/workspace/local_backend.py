@@ -15,6 +15,7 @@ from cli_rb.quality.verification import VerificationLedger
 from cli_rb.workspace.approval_policy import command_decision
 from cli_rb.workspace.patches import file_bytes
 from cli_rb.workspace.command_review import requires_human
+from cli_rb.workspace.command_feedback import command_feedback
 
 
 def project_environment(root):
@@ -103,6 +104,15 @@ class LocalCodingBackend(DockerCodingBackend):
     def run_write_command(self, command, timeout_seconds=60):
         return self.run_command(command, timeout_seconds)
 
+    def environment_facts(self):
+        # Do not start the project's Python merely to discover packages.
+        return {'scope': 'local command PATH at turn start',
+                'git_metadata_visible': (self.snapshot.workspace / '.git').exists(),
+                'commands': {name: shutil.which(name, path=self.env['PATH']) is not None
+                             for name in ('git', 'rg', 'apply_patch', 'python')},
+                'pytest_in_command_python': None,
+                'python_package_scope': 'not probed; local Python may differ from runtime'}
+
     @staticmethod
     def _terminate(process):
         if process.poll() is not None:
@@ -133,8 +143,9 @@ class LocalCodingBackend(DockerCodingBackend):
         if not self._authorize(
                 '允许在本机执行以下命令？命令可读写文件、访问网络，权限不限于项目目录。\n' +
                 f'目录：{self.snapshot.workspace}\n{command}', automatic, reason):
-            return json.dumps({'exit_code': None, 'timed_out': False, 'denied': True,
-                               'output': '用户未授权，命令未执行。不得绕过。'}, ensure_ascii=False)
+            return self._record('command', args, json.dumps({
+                'exit_code': None, 'timed_out': False, 'denied': True, 'started': False,
+                'output': '用户未授权，命令未执行。不得绕过。'}, ensure_ascii=False))
         name = 'cli-rb-' + uuid4().hex
         output = self.logs / f'{name}-output.txt'
         argv = ([self.shell, '-NoProfile', '-NonInteractive', '-Command',
@@ -163,6 +174,9 @@ class LocalCodingBackend(DockerCodingBackend):
                 with self._active_lock:
                     self._active.discard(process)
         result = json.dumps({'exit_code': process.returncode, 'timed_out': timed_out,
+                             'started': True, 'shell': self.shell,
+                             'initial_cwd': str(self.snapshot.workspace),
+                             'executed_command': command,
                              'output': output.read_text(encoding='utf-8', errors='replace')}, ensure_ascii=False)
         response = self._record('command', args, result, name)
         journal.write_text(json.dumps({'action': 'command', 'state': 'cancelled' if self._cancelled.is_set() else 'returned', 'pid': process.pid}), encoding='utf-8')
@@ -197,6 +211,7 @@ class LocalCodingBackend(DockerCodingBackend):
             data = json.loads(result)
             self.command_evidence.append({'command': args['command'], 'exit_code': data['exit_code'],
                                          'timed_out': data['timed_out'], 'log_id': name})
+            return command_feedback(result, name)
         if len(result) > 16000:
             return result[:16000] + f'\n[输出截断；使用 read_tool_log，log_id={name}，offset=16000]'
         return result

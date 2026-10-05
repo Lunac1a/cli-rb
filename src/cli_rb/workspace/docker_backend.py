@@ -6,9 +6,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import threading
+import time
 from uuid import uuid4
 
 from cli_rb.workspace.snapshot import Snapshot
+from cli_rb.workspace.command_feedback import command_feedback
 
 IMAGE = "python:3.12-slim-bookworm"
 
@@ -122,6 +124,9 @@ class DockerReadBackend:
         request = json.dumps({"action": action, "args": args, "protected_paths": list(self._protected)}, ensure_ascii=False)
         journal = self.logs / f"{name}-action.json"
         journal.write_text(json.dumps({"action": action, "state": "started"}), encoding="utf-8")
+        started = time.monotonic()
+        phase = 'create_container'
+        create_seconds = None
         try:
             # Creation does not execute the worker. Cancellation must either stop
             # creation or see its registered name before returning from cleanup.
@@ -130,11 +135,13 @@ class DockerReadBackend:
                     raise RuntimeError("会话已取消，不再执行工具。")
                 self._active.add(name)
                 created = subprocess.run(self.command(name), capture_output=True, timeout=30)
+                create_seconds = time.monotonic() - started
                 if created.returncode:
                     raise RuntimeError("容器创建失败；没有执行工具。")
             # A late start cannot recreate a container removed by cancel_all.
             if self._cancelled.is_set():
                 raise RuntimeError("会话已取消，不再执行工具。")
+            phase = 'start_and_execute'
             run = subprocess.run(
                 [self.docker, "start", "--attach", "--interactive", name],
                 input=request, capture_output=True, text=True,
@@ -144,12 +151,18 @@ class DockerReadBackend:
                 result = "工具错误：容器执行失败；请检查 Docker。没有回退到宿主机。"
             else:
                 result = json.loads(run.stdout)["result"]
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+            interrupted_seconds = time.monotonic() - started
             cleanup = subprocess.run(
                 [self.docker, "rm", "--force", name], capture_output=True, timeout=15,
             )
             (self.logs / f"{name}-interrupted.json").write_text(
                 json.dumps({"request": json.loads(request), "interrupted": True,
+                            "phase": phase, "error_type": type(exc).__name__,
+                            "timeout_seconds": getattr(exc, 'timeout', None),
+                            "create_seconds": create_seconds,
+                            "elapsed_before_cleanup_seconds": interrupted_seconds,
+                            "worker_vs_startup_time": "unknown",
                             "cleanup_exit": cleanup.returncode}), encoding="utf-8",
             )
             raise
@@ -174,6 +187,7 @@ class DockerReadBackend:
                 outcome = json.loads(result)
                 self.command_evidence.append({"command": args["command"],
                     "exit_code": outcome["exit_code"], "timed_out": outcome["timed_out"], "log_id": name})
+                return command_feedback(result, name)
             except (ValueError, KeyError, TypeError):
                 self.command_evidence.append({"command": args["command"], "status": "uncertain", "log_id": name})
         if len(result) > 16000:
@@ -190,6 +204,9 @@ class DockerReadBackend:
 
     def read_file(self, path, start_line=1, max_lines=80):
         return self._call("read", {"path": path, "start_line": start_line, "max_lines": max_lines})
+
+    def environment_facts(self):
+        return json.loads(self._call('environment', {}))
 
     def list_files(self, path=".", offset=0, limit=50):
         return self._call("list", {"path": path, "offset": offset, "limit": limit})

@@ -106,7 +106,7 @@ def test_interrupted_command_continues_without_replay_after_review(tmp_path, mod
         }])])
         with SessionStore(snapshot.session, create=True, model_config={}) as store:
             async with AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite')) as saver:
-                agent = build_agent(model, first_backend, coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, first_backend, coding=True, harness='full', session=store, checkpointer=saver)
 
                 async def run():
                     async for _ in astream_turn(agent, [HumanMessage(content='写入后等待')]):
@@ -137,7 +137,7 @@ def test_interrupted_command_continues_without_replay_after_review(tmp_path, mod
             AIMessage(content='修改已保留，未运行验证；没有重跑旧命令。')])
         with SessionStore(snapshot.session, allow_interrupted=True) as store:
             async with AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite')) as saver:
-                agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend, coding=True, harness='full', session=store, checkpointer=saver)
                 ensure_session_stopped(snapshot.session, docker)
                 fingerprints = store.action_fingerprints()
                 state = await agent.graph.aget_state(store.config)
@@ -194,7 +194,7 @@ def test_resume_docker_edit_keeps_baseline_and_never_replays(tmp_path, mode):
         ] if first else [AIMessage(content='已有修改保留')]))
         with SessionStore(snapshot.session, create=first, model_config={}) as store:
             async with AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite')) as saver:
-                agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend, coding=True, harness='full', session=store, checkpointer=saver)
                 if not first:
                     history = await store.history(agent)
                     assert len(history) == 8
@@ -231,7 +231,7 @@ def test_task_deadline_stops_command_and_preserves_written_file(tmp_path):
     }])])
     start = time.monotonic()
     with pytest.raises(TaskTimeLimitExceeded):
-        list(stream_turn(build_agent(model, backend, coding=True, task_timeout_seconds=5),
+        list(stream_turn(build_agent(model, backend, coding=True, harness='full', task_timeout_seconds=5),
                          [HumanMessage(content='执行')]))
     assert time.monotonic() - start < 15
     assert (snapshot.workspace / 'progress.txt').read_text().strip() == 'saved'
@@ -270,7 +270,7 @@ def test_deadline_while_waiting_for_permission_never_deletes(tmp_path):
         'name': 'delete_file', 'args': {'path': 'keep.txt', 'expected_content': 'keep'},
         'id': 'delete', 'type': 'tool_call',
     }])])
-    agent = build_agent(model, backend, coding=True, task_timeout_seconds=0.3)
+    agent = build_agent(model, backend, coding=True, harness='full', task_timeout_seconds=0.3)
     with pytest.raises(TaskTimeLimitExceeded):
         asyncio.run(display_turn(agent, [HumanMessage(content='删除')], backend, []))
     assert entered and closed == [True]
@@ -300,7 +300,7 @@ def test_tool_budget_preserves_prior_direct_edit_and_blocks_pending_batch(tmp_pa
         'id': name, 'type': 'tool_call',
     } for name in ['one.txt', 'two.txt']])])
     with pytest.raises(ToolCallLimitExceededError):
-        list(stream_turn(build_agent(model, backend, coding=True, tool_call_limit=3),
+        list(stream_turn(build_agent(model, backend, coding=True, harness='full', tool_call_limit=3),
                          [HumanMessage(content='修改')]))
     assert (repo / 'a.txt').read_text() == 'after'
     assert not (repo / 'one.txt').exists() and not (repo / 'two.txt').exists()
@@ -451,7 +451,7 @@ def test_async_agent_cancellation_stops_command_before_next_model_call(tmp_path)
 
     async def check():
         completed = []
-        task = asyncio.create_task(display_turn(build_agent(model, backend, coding=True),
+        task = asyncio.create_task(display_turn(build_agent(model, backend, coding=True, harness='full'),
                                    [HumanMessage(content='执行命令')], backend, completed))
         try:
             async with asyncio.timeout(10):

@@ -8,7 +8,7 @@ from importlib.resources import files
 
 
 def coding_prompt(*, mode='isolated', model_call_limit=50, tool_call_limit=100,
-                  task_timeout_seconds=1800, execution_rules=None):
+                  task_timeout_seconds=1800, execution_rules=None, harness='assist'):
     if mode not in {'direct', 'isolated'}:
         raise ValueError('Unknown workspace mode')
     direct = mode == 'direct'
@@ -30,7 +30,8 @@ def coding_prompt(*, mode='isolated', model_call_limit=50, tool_call_limit=100,
         'These numbers are not live remaining allowances. Do not assume unlimited calls; leave room for the final report. '
         'Hard limits do not automatically increase when work remains unfinished.'
     )
-    text = files('cli_rb').joinpath('prompts', 'coding.md').read_text(encoding='utf-8')
+    template = 'assisted.md' if harness == 'assist' else 'coding.md'
+    text = files('cli_rb').joinpath('prompts', template).read_text(encoding='utf-8')
     for name, value in {'workspace_rules': workspace_rules, 'patch_rules': patch_rules,
                         'budget_rules': budget_rules}.items():
         marker = '{{' + name + '}}'

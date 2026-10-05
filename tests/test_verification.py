@@ -110,7 +110,7 @@ def test_framework_feedback_repairs_before_releasing_final_answer(backend):
         call('run_verification', command='pytest', scope='value behavior', behavior_ids=['value'], assertion='assert value == 2'),
         AIMessage(content='已修改并验证。'),
     ])
-    events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='修复')]))
+    events = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='修复')]))
     assert len(model.seen) == 5
     assert not any('UNVERIFIED DRAFT' in e.text for e in events)
     assert events[-1].response_metadata['completion_check']['status'] == 'evidence_current'
@@ -123,7 +123,7 @@ def test_feedback_is_bounded_and_never_hides_unresolved_evidence(backend):
         call('edit_file', path='app.py', old_text='value = 1', new_text='value = 2'),
         AIMessage(content='完成'), AIMessage(content='暂未验证'),
     ])
-    result = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='修改')]))
+    result = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='修改')]))
     assert len(model.seen) == 3
     assert result[-1].response_metadata['completion_check']['status'] == 'needs_attention'
     assert '验证证据未通过' in result[-1].text
@@ -131,14 +131,14 @@ def test_feedback_is_bounded_and_never_hides_unresolved_evidence(backend):
 
 def test_no_change_question_does_not_require_tests_or_extra_calls(backend):
     model = ScriptedModel(replies=[AIMessage(content='代码说明')])
-    result = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='解释')]))
+    result = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='解释')]))
     assert len(model.seen) == 1 and result[-1].text == '代码说明'
 
 
 def test_final_check_respects_last_model_call(backend):
     model = ScriptedModel(replies=[
         call('edit_file', path='app.py', old_text='value = 1', new_text='value = 2'), AIMessage(content='完成')])
-    result = list(stream_turn(build_agent(model, backend, coding=True, model_call_limit=2), [HumanMessage(content='修改')]))
+    result = list(stream_turn(build_agent(model, backend, coding=True, harness='full', model_call_limit=2), [HumanMessage(content='修改')]))
     assert len(model.seen) == 2
     assert result[-1].response_metadata['completion_check']['status'] == 'needs_attention'
 
@@ -179,13 +179,13 @@ def test_persisted_final_audit_survives_reopening_and_next_question(backend):
                     behavior_plan(),
                     call('edit_file', path='app.py', old_text='value = 1', new_text='value = 2'),
                     call('run_verification', command='pytest', scope='value', behavior_ids=['value'], assertion='assert value == 2'), AIMessage(content='已验证')])
-                agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend, coding=True, harness='full', session=store, checkpointer=saver)
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='修改')])]
                 assert events[-1].response_metadata['completion_check']['status'] == 'evidence_current'
         with SessionStore(session) as store:
             async with AsyncSqliteSaver.from_conn_string(str(session/'checkpoints.sqlite')) as saver:
                 model = ScriptedModel(replies=[AIMessage(content='这是说明')])
-                agent = build_agent(model, backend, coding=True, session=store, checkpointer=saver)
+                agent = build_agent(model, backend, coding=True, harness='full', session=store, checkpointer=saver)
                 saved = await store.history(agent)
                 assert saved[-1].response_metadata['completion_check']['status'] == 'evidence_current'
                 events = [e async for e in astream_turn(agent, [HumanMessage(content='只解释')])]

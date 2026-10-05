@@ -13,7 +13,7 @@ def test_coding_last_request_reports_within_budget(backend):  # noqa: F811
         call('read_file', path='app.py'), call('read_file', path='app.py'),
         AIMessage(content='Inspected only; no changes or tests.'),
     ])
-    agent = build_agent(model, backend, coding=True, model_call_limit=3)
+    agent = build_agent(model, backend, coding=True, harness='full', model_call_limit=3)
     events = list(stream_turn(agent, [HumanMessage(content='Inspect')]))
     assert 'Inspected only' in events[-1].text
     assert agent.requests.calls == 3
@@ -62,7 +62,7 @@ def test_budget_checkpoint_preserves_tool_work_and_reserves_final(backend):  # n
         *[call('read_file', path='app.py') for _ in range(6)],
         AIMessage(content='Inspected only; no changes or tests.'),
     ])
-    agent = build_agent(model, backend, coding=True, model_call_limit=7)
+    agent = build_agent(model, backend, coding=True, harness='full', model_call_limit=7)
     events = list(stream_turn(agent, [HumanMessage(content='Inspect')]))
     assert not any('Budget checkpoint:' in m.text for m in model.seen[1])
     assert '5 model requests remain' in model.seen[2][-1].text

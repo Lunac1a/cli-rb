@@ -76,8 +76,8 @@ async def run_task(task, repo, image, output, config, *, seconds=600,
     if probe['exit_code'] != 0 or probe['timed_out']:
         raise RuntimeError('评测 Python 环境探针失败。')
     prompt = (f'Fix the following issue in the repository. Inspect code, implement the fix, '
-              f'and run relevant existing tests or your own reproduction. Dependencies are '
-              f'already installed; use python / pytest offline.\n\n{task.problem_statement}')
+              f'and run relevant existing tests or your own reproduction. Work offline in the prepared environment; '
+              f'inspect repository test configuration and the available runner; do not assume optional tools are installed.\n\n{task.problem_statement}')
     started = time.monotonic()
     status, error = 'ended', None
     last_message = None
@@ -86,6 +86,8 @@ async def run_task(task, repo, image, output, config, *, seconds=600,
         with SessionStore(snapshot.session, create=True, model_config={
             'base_url': config.base_url, 'model': config.model,
         }) as store:
+            store.data['harness'] = 'assist'
+            store.save()
             async with AsyncSqliteSaver.from_conn_string(str(snapshot.session / 'checkpoints.sqlite')) as saver:
                 agent = build_agent(config.build_model(), backend, coding=True,
                                     task_timeout_seconds=seconds, checkpointer=saver, session=store)
@@ -113,7 +115,7 @@ async def run_task(task, repo, image, output, config, *, seconds=600,
                   final_reply_status=reply_status(last_message),
                   original_reply_status=(last_message.response_metadata.get('original_reply_status')
                                          if last_message else None),
-                  model_reply_count_including_recovery=model_reply_count, task_success=None,
+                  model_reply_count_including_recovery=model_reply_count, task_success=None, harness='assist',
                   evaluation_variant=metadata['evaluation_variant'],
                   elapsed_seconds=time.monotonic() - started, session=str(snapshot.session),
                   image=image, base_commit=task.base_commit, command_evidence=backend.command_evidence,

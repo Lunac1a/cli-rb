@@ -11,7 +11,7 @@ from cli_rb.runtime.agent import build_agent, stream_turn
 def test_coding_prompt_reaches_model_and_empty_reply_recovery_with_actual_limits(mode):
     backend = SimpleNamespace(snapshot=SimpleNamespace(mode=mode))
     model = ScriptedModel(replies=[AIMessage(content=''), AIMessage(content='未执行测试。')])
-    agent = build_agent(model, backend, coding=True, model_call_limit=7,
+    agent = build_agent(model, backend, coding=True, harness='full', model_call_limit=7,
                         tool_call_limit=13, task_timeout_seconds=90)
     replies = list(stream_turn(agent, [HumanMessage(content='说明当前执行范围')]))
     assert replies[-1].content == '未执行测试。'

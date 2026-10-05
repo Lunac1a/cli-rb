@@ -2,7 +2,9 @@
 
 from pathlib import PurePosixPath
 import subprocess
-from typing import Protocol
+from typing import Annotated, Protocol
+
+from pydantic import Field
 
 from langchain_core.tools import tool
 
@@ -21,8 +23,8 @@ class FixtureBackend:
         parsed = PurePosixPath(path)
         if not path or parsed.is_absolute() or ".." in parsed.parts or "\\" in path or ":" in path:
             raise ValueError("只允许工作区内的相对路径。")
-        if start_line < 1 or not 1 <= max_lines <= 200:
-            raise ValueError("start_line 必须 >= 1；max_lines 必须在 1–200 之间。")
+        if start_line < 1 or not 1 <= max_lines <= 400:
+            raise ValueError("start_line 必须 >= 1；max_lines 必须在 1–400 之间。")
         key = str(parsed)
         if key not in self._files:
             raise FileNotFoundError("工作区中不存在该文件。")
@@ -37,8 +39,9 @@ class FixtureBackend:
 
 def make_read_tool(backend: ReadBackend):
     @tool
-    def read_file(path: str, start_line: int = 1, max_lines: int = 80) -> str:
-        """Read a workspace-relative file path (e.g. src/app.py, never /workspace/src/app.py). start_line >= 1, max_lines 1-200. Large pages stop early; follow the returned next line."""
+    def read_file(path: str, start_line: Annotated[int, Field(ge=1)] = 1,
+                  max_lines: Annotated[int, Field(ge=1, le=400)] = 80) -> str:
+        """Read a workspace-relative file path (e.g. src/app.py, never /workspace/src/app.py). start_line >= 1, max_lines 1-400. Large pages stop early; follow the returned next line."""
         try:
             return backend.read_file(path, start_line, max_lines)
         except (ValueError, FileNotFoundError) as error:
@@ -46,6 +49,7 @@ def make_read_tool(backend: ReadBackend):
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             return f"工具错误：{type(error).__name__}；后端执行失败。"
 
+    read_file.handle_validation_error = '工具参数错误：start_line 必须 >= 1，max_lines 必须为 1–400；调整参数后再读取。'
     return read_file
 
 
@@ -64,6 +68,8 @@ def make_workspace_tools(backend):
         try:
             return backend.find_files(pattern, path, offset, limit)
         except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            if isinstance(error, subprocess.TimeoutExpired):
+                return '工具错误：文件查找超时，范围未完整检查，不能视为文件不存在。缩小到已知子目录；不要原样重试。'
             return f'工具错误：{type(error).__name__}: {error}'
     @tool
     def list_files(path: str = ".", offset: int = 0, limit: int = 50) -> str:
@@ -75,10 +81,12 @@ def make_workspace_tools(backend):
 
     @tool
     def search_files(query: str, path: str = ".", offset: int = 0, limit: int = 50) -> str:
-        """Search a literal substring, NOT regex. path must be a workspace-relative DIRECTORY ('.' or 'src'), not a file or absolute path. Returns file paths and line numbers."""
+        """Search a literal substring, NOT regex. path is a workspace-relative file or directory. Prefer a known file or subsystem over repository-wide scans. Returns file paths and line numbers."""
         try:
             return backend.search_files(query, path, offset, limit)
         except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            if isinstance(error, subprocess.TimeoutExpired):
+                return '工具错误：搜索执行超时，搜索范围未完整检查，不能视为没有匹配。缩小到已知文件或子目录；不要原样重试。'
             return f"工具错误：{type(error).__name__}"
 
     return [make_read_tool(backend), list_files, search_files,

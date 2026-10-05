@@ -300,10 +300,13 @@ def resume_history(runner, store, agent, backend, docker):
 
 
 @app.command()
-def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | None = None, local: bool = True):
+def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | None = None,
+         local: bool = True, harness: str | None = None):
     """打开项目；默认本地执行，--no-local 使用 Docker。"""
     console.rule("CLI Rb · 编码助手", style="cyan")
     try:
+        if harness not in {None, 'full', 'assist'}:
+            raise ValueError('--harness 仅支持 full 或 assist。')
         if isolated:
             local = False
         if resume:
@@ -339,6 +342,12 @@ def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | 
         with SessionStore(snapshot.session, create=not resume, model_config=(
             {'base_url': config.base_url, 'model': config.model} if config else None
         ), allow_interrupted=bool(resume)) as store:
+            saved_harness = store.data.get('harness', 'full')
+            if resume and harness is not None and harness != saved_harness:
+                raise ValueError('恢复会话必须沿用原 Harness 模式。')
+            selected_harness = saved_harness if resume else harness or 'assist'
+            store.data['harness'] = selected_harness
+            store.save()
             config = ModelConfig(**store.data['model_config'])
             docker = None
             if local:
@@ -360,7 +369,7 @@ def chat(isolated: bool = False, task_minutes: TaskMinutes = 30, resume: Path | 
                 try:
                     agent = build_agent(config.build_model(), backend, coding=True,
                                         task_timeout_seconds=task_minutes * 60,
-                                        checkpointer=saver, session=store)
+                                        checkpointer=saver, session=store, harness=selected_harness)
                     history = (resume_history(runner, store, agent, backend, docker) if resume
                                else runner.run(store.history(agent)))
                     if history is None:

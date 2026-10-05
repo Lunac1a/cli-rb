@@ -7,6 +7,9 @@ from dataclasses import dataclass
 import asyncio
 import math
 import re
+import json
+import time
+import logging
 from contextlib import aclosing
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, RemoveMessage
 
@@ -48,6 +51,7 @@ class AgentRuntime:
     completion: object = None
     graph_step_limit: int | None = None
     requests: object = None
+    assistance: object = None
 
 
 class TaskTimeLimitExceeded(Exception):
@@ -64,7 +68,11 @@ Do not execute or request tools, substitute passing tests for other requirements
 
 def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
                 model_call_limit=50, tool_call_limit=100, task_timeout_seconds=1800,
-                checkpointer=None, session=None, context_policy=None):
+                checkpointer=None, session=None, context_policy=None, harness=None):
+    if harness is None:
+        harness = 'assist' if coding else 'full'
+    if harness not in {'full', 'assist'} or (harness == 'assist' and not coding):
+        raise ValueError('harness must be full, or assist for coding mode.')
     if type(model_call_limit) is not int or model_call_limit < 1:
         raise ValueError("模型调用额度必须为正整数。")
     if type(tool_call_limit) is not int or tool_call_limit < 1:
@@ -80,7 +88,7 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
         prompt = coding_prompt(mode=backend.snapshot.mode, model_call_limit=model_call_limit,
                                tool_call_limit=tool_call_limit,
                                task_timeout_seconds=task_timeout_seconds,
-                               execution_rules=getattr(backend, 'execution_rules', None))
+                               execution_rules=getattr(backend, 'execution_rules', None), harness=harness)
         if getattr(backend, 'execution_rules', None):
             for tool in tools:
                 if tool.name in {'run_command', 'run_write_command', 'run_verification'}:
@@ -92,16 +100,24 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
     if session is not None:
         from cli_rb.runtime.history import make_history_tool
         tools.append(make_history_tool(session))
-    planning = PlanningMiddleware(getattr(backend, 'verification', None)) if coding else None
-    completion = CompletionMiddleware(backend, model_call_limit) if coding and hasattr(backend, 'verification') else None
+    assistance = None
+    if harness == 'assist':
+        from cli_rb.runtime.assistance import AssistanceMiddleware, assisted_tools
+        assistance = AssistanceMiddleware(backend, model_call_limit, tool_call_limit, task_timeout_seconds)
+        tools = assisted_tools(backend, tools, assistance)
+    planning = PlanningMiddleware(getattr(backend, 'verification', None)) if coding and not assistance else None
+    completion = CompletionMiddleware(backend, model_call_limit) if coding and not assistance and hasattr(backend, 'verification') else None
     context = None
     if session is not None:
         from cli_rb.runtime.context import ContextMiddleware
         context = ContextMiddleware(model, prompt, [*tools, *(planning.tools if planning else [])],
                                     model_call_limit, session, policy=context_policy,
-                                    prompt_suffix=planning_prompt if planning else None)
+                                    prompt_suffix=assistance.suffix if assistance else planning_prompt if planning else None)
     requests = ModelRequestRecovery(model_call_limit, session, reserve_final=coding)
+    if assistance:
+        assistance.context, assistance.requests = context, requests
     graph = create_agent(model=model, tools=tools, system_prompt=prompt, checkpointer=checkpointer, middleware=[
+        *([assistance] if assistance else []),
         *([planning] if planning else []),
         *([context] if context else []),
         *([completion] if completion else []),
@@ -113,7 +129,7 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
     # Model/tool/time middleware still enforce the actual work allowances.
     graph_step_limit = len(graph.nodes) * (model_call_limit + 1)
     return AgentRuntime(graph, model, prompt, model_call_limit, task_timeout_seconds,
-                        backend, session, context, completion, graph_step_limit, requests)
+                        backend, session, context, completion, graph_step_limit, requests, assistance)
 
 
 def reply_status(message):
@@ -183,6 +199,41 @@ async def astream_turn(agent, messages):
 
 
 async def _timed_turn(agent, messages):
+    """Record observed stop facts without changing the loop or its budget."""
+    from cli_rb.runtime.stop_diagnostics import termination_record
+    started = time.monotonic()
+    last, error, tool_results = None, None, 0
+    path = agent.backend.snapshot.session if agent.completion or agent.assistance else None
+    checks_path = path / 'completion-checks.jsonl' if path else None
+    previous_checks = len(checks_path.read_text(encoding='utf-8').splitlines()) if checks_path and checks_path.exists() else 0
+    try:
+        async with aclosing(_timed_events(agent, messages)) as events:
+            async for event in events:
+                if isinstance(event, AIMessage):
+                    last = event
+                tool_results += getattr(event, 'type', None) == 'tool'
+                yield event
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        if path:
+            try:
+                checks = [json.loads(line) for line in checks_path.read_text(encoding='utf-8').splitlines()[previous_checks:]] if checks_path.exists() else []
+                report = (agent.backend.verification.assess() if agent.assistance
+                          else agent.backend.verification.review())
+                record = termination_record(error, bool(last and has_reply(last)), report,
+                    elapsed=time.monotonic() - started, time_limit=agent.task_timeout_seconds,
+                    model_calls=agent.requests.calls if agent.requests else None,
+                    model_limit=agent.model_call_limit, tool_results=tool_results, checks=checks,
+                    final_only=bool(agent.requests and agent.requests.records and agent.requests.records[-1].get('final_only')))
+                with (path / 'stop-diagnostics.jsonl').open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps(record, ensure_ascii=False) + '\n')
+            except (OSError, ValueError, RuntimeError):
+                logging.getLogger(__name__).exception('Could not persist stop diagnostics')
+
+
+async def _timed_events(agent, messages):
     """One monotonic deadline across model, tools and tool-free recovery."""
     deadline = asyncio.get_running_loop().time() + agent.task_timeout_seconds
     if agent.context:

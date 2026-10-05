@@ -45,6 +45,23 @@ def parse_test_evidence(result):
             # Preserve the raw report for inspection; text remains a fallback.
             pass
     output = re.sub(r'\x1b\[[0-9;]*m', '', result.get('output', ''))
+    if re.search(r'^=+\s+tests finished:', output, re.M):
+        # The native runner wraps long summaries; it does not report node IDs.
+        aliases = {'passed': 'passed', 'failed': 'failed', 'skipped': 'skipped',
+                   'expected to fail': 'xfailed',
+                   'expected to fail but passed': 'xpassed', 'exceptions': 'errors'}
+        labels = '|'.join(sorted(aliases, key=len, reverse=True))
+        summaries = re.findall(
+            rf'^=+\s+tests finished:\s*((?:\d+ (?:{labels}),\s*)+)'
+            r'in \d+(?:\.\d+)? seconds\s*=+\s*$', output, re.M)
+        counts = None
+        if len(summaries) == 1 and len(re.findall(r'^=+\s+tests finished:', output, re.M)) == 1:
+            counts = dict.fromkeys(STATUSES, 0)
+            for number, label in re.findall(rf'(\d+) ({labels}),', summaries[0]):
+                counts[aliases[label]] += int(number)
+        return {'framework': 'sympy', 'counts': counts,
+                'total': sum(counts.values()) if counts is not None else None,
+                'nodes': {}, 'nodes_complete': False}
     counts, total, framework = None, None, None
     summaries = []
     for line in output.splitlines():
@@ -92,6 +109,25 @@ def parse_test_evidence(result):
             node, status = match.groups()
             duplicate |= node in nodes
             nodes[node] = {'XFAIL': 'xfailed', 'XPASS': 'xpassed', 'ERROR': 'errors'}.get(status, status.lower())
+    elif framework == 'unittest':
+        pending = None
+        statuses = {'ok': 'passed', 'FAIL': 'failed', 'ERROR': 'errors',
+                    'expected failure': 'xfailed', 'unexpected success': 'xpassed'}
+        for line in output.splitlines():
+            match = re.match(r'^(test\S*|runTest) \(([^()\n]+)\)(.*)$', line)
+            if match:
+                name, owner, tail = match.groups()
+                pending = 'unittest:' + owner + '::' + name
+            elif pending:
+                tail = line
+            else:
+                continue
+            status_match = re.search(r' \.\.\. (ok|FAIL|ERROR|expected failure|unexpected success|skipped .+)$', tail)
+            if status_match and pending:
+                status = status_match[1]
+                duplicate |= pending in nodes
+                nodes[pending] = 'skipped' if status.startswith('skipped ') else statuses[status]
+                pending = None
     complete = bool(nodes and counts and not duplicate and not result.get('timed_out') and
                     result.get('exit_code') in (0, 1) and
                     (result.get('exit_code') == 0 or counts['failed'] or counts['errors']) and
@@ -186,6 +222,8 @@ def evidence_summary(report):
     if report.get('replacements'):
         lines.append(f"新旧证据有 {len(report['replacements'])} 条替代关系，原日志保留；上述计数按每次运行列出，不跨运行相加。")
         for link in report['replacements']:
+            if link.get('basis') == 'runner_startup_recovered':
+                lines.append(f"- 启动阻碍已解决 {link['old_id']} → {link['new_id']}：同一测试目标 {link['target']} 已在当前代码上成功运行；原失败日志保留。")
             if link.get('basis') in {'explicit_test_replacement_claim', 'explicit_check_to_test_claim'}:
                 lines.append(f"- 显式替代 {link['old_id']} → {link['new_id']}：{link['reason']}（覆盖关系为模型声明，不是程序证明）")
     for risk in report.get('risks', []):

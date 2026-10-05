@@ -131,7 +131,7 @@ def test_test_migration_reminder_is_visible_without_a_feedback_loop(backend):
         call('run_verification', command='pytest', scope='value', behavior_ids=['value'], assertion='value is correct'),
         AIMessage(content='Moved the test; current test passes.'),
     ])
-    events = list(stream_turn(build_agent(model, backend, coding=True), [HumanMessage(content='Move tests')]))
+    events = list(stream_turn(build_agent(model, backend, coding=True, harness='full'), [HumanMessage(content='Move tests')]))
     assert len(model.seen) == 5
     final = events[-1]
     assert final.response_metadata['completion_check']['completion_status'] == 'declared_behaviors_evidenced'
