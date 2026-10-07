@@ -77,7 +77,7 @@ class ModelConfig:
             else {"use_responses_api": False, "temperature": 0,
                   "reasoning_effort": self.reasoning_effort}
         )
-        return ChatOpenAI(
+        model = ChatOpenAI(
             model=self.model,
             base_url=self.base_url,
             api_key=self.api_key(),
@@ -88,3 +88,7 @@ class ModelConfig:
             max_retries=0,
             **protocol,
         )
+        if self.use_responses_api:
+            from cli_rb.runtime.response_stream import install_tool_argument_repair
+            install_tool_argument_repair(model)
+        return model

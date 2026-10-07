@@ -98,6 +98,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "langchain" },
     { name = "langchain-openai" },
     { name = "langgraph-checkpoint-sqlite" },
@@ -116,6 +117,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "httpx2", specifier = ">=2.13,<3" },
     { name = "langchain", specifier = ">=1.0,<2" },
     { name = "langchain-openai", specifier = ">=1.0,<2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3,<4" },

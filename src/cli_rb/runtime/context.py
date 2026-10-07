@@ -350,9 +350,12 @@ class ContextMiddleware(SummarizationMiddleware):
         if journal.get('task_key') != task_key:
             journal = {}
         latched = journal.get('latched', False)
+        attempts = journal.get('attempts', 0)
         if total < self.policy.input_limit * self.policy.rearm_ratio:
             latched = False
-        attempts = journal.get('attempts', 0)
+            # A successful reduction rearms maintenance for the next growth cycle.
+            # Failed summaries at sustained pressure still share a bounded allowance.
+            attempts = 0
         count = state.get('run_model_call_count', 0)
         remaining = float('inf') if self.deadline is None else self.deadline - time.monotonic()
         native = self.policy.strategy == 'codex_v2'

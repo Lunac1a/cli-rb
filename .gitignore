@@ -8,6 +8,7 @@ pytest-cache-files-*/
 .env.*
 !.env.example
 dist/
+/tmp/
 .cli-rb/
 
 # Local learning notes and project plans

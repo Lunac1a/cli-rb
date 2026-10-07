@@ -1,0 +1,35 @@
+[
+  {
+    "type": "response.output_item.added",
+    "sequence_number": 4,
+    "output_index": 1,
+    "item": {
+      "type": "function_call",
+      "id": "fc_0fe4025629d5051a016ac639decf9c87d08c1373ded46afed4",
+      "call_id": "call_03ed9d4d94ed4ec0a714c5b613d38160",
+      "name": "read_file",
+      "arguments": "",
+      "status": "in_progress"
+    }
+  },
+  {
+    "type": "response.function_call_arguments.done",
+    "sequence_number": 5,
+    "item_id": "fc_0fe4025629d5051a016ac639decf9c87d08c1373ded46afed4",
+    "output_index": 1,
+    "arguments": "{\"max_lines\": 230, \"path\": \"crates/printer/src/jsont.rs\", \"start_line\": 100}"
+  },
+  {
+    "type": "response.output_item.done",
+    "sequence_number": 6,
+    "output_index": 1,
+    "item": {
+      "type": "function_call",
+      "id": "fc_0fe4025629d5051a016ac639decf9c87d08c1373ded46afed4",
+      "call_id": "call_03ed9d4d94ed4ec0a714c5b613d38160",
+      "name": "read_file",
+      "arguments": "{\"max_lines\": 230, \"path\": \"crates/printer/src/jsont.rs\", \"start_line\": 100}",
+      "status": "completed"
+    }
+  }
+]

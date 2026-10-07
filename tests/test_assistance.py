@@ -2,6 +2,8 @@
 import asyncio
 import json
 import subprocess
+import pytest
+from pydantic import ValidationError
 from dataclasses import replace
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,6 +15,21 @@ from cli_rb.runtime.agent import build_agent, stream_turn, astream_turn
 from cli_rb.runtime.persistence import SessionStore
 
 backend = controlled_backend
+
+
+def test_verification_timeout_schema_matches_execution_boundary(backend):
+    agent = build_agent(ScriptedModel(replies=[]), backend, coding=True)
+    from cli_rb.runtime.assistance import assisted_tools
+    verification = next(t for t in assisted_tools(backend, [], agent.assistance)
+                        if t.name == 'run_verification')
+    schema = verification.args_schema
+    for seconds in (1, 60):
+        assert schema.model_validate({'command': 'pytest', 'timeout_seconds': seconds}).timeout_seconds == seconds
+    for seconds in (0, 61, 180):
+        with pytest.raises(ValidationError):
+            schema.model_validate({'command': 'pytest', 'timeout_seconds': seconds})
+    bounds = schema.model_json_schema()['properties']['timeout_seconds']
+    assert bounds['minimum'] == 1 and bounds['maximum'] == 60
 
 
 def observations(messages):

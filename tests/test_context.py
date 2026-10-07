@@ -73,7 +73,7 @@ def test_optional_summary_fallback_and_hard_limits(tmp_path, failure):
             async with AsyncSqliteSaver.from_conn_string(str(tmp_path/'checkpoints.sqlite')) as saver:
                 agent = build_agent(model, demo_backend(), session=store, checkpointer=saver,
                                     model_call_limit=1 if failure == 'budget' else 3,
-                                    context_policy=ContextPolicy(window=32768, summary_seconds=0.02, max_attempts=1))
+                                    context_policy=ContextPolicy(window=35000, summary_seconds=0.02, max_attempts=1))
                 await seed(agent, store)
                 text = '过大' * 20000 if failure == 'large_input' else '继续'
                 if failure == 'large_input':
@@ -216,6 +216,28 @@ def test_failed_summary_at_hard_limit_preserves_attempt_and_originals(tmp_path):
             with pytest.raises(ContextLimitExceeded):
                 await context.abefore_model({'messages': messages}, None)
             assert len(model.seen) <= 2
+    asyncio.run(run())
+
+
+def test_successful_compaction_rearms_for_three_growth_cycles(tmp_path):
+    async def run():
+        with SessionStore(tmp_path, create=True) as store:
+            model = ScriptedModel(replies=[AIMessage(content='Keep constraints and pending work.')] * 3)
+            context = build_agent(model, demo_backend(), session=store, model_call_limit=12).context
+            state = {'messages': [HumanMessage(content='Keep this requirement.')],
+                     'run_model_call_count': 0}
+            for cycle in range(3):
+                state['messages'].insert(0, AIMessage(content='a' * 45000))
+                update = await context.abefore_model(state, None)
+                assert 'messages' in update
+                state.update({k: v for k, v in update.items() if k != 'messages'})
+                state['messages'] = update['messages'][1:]
+                assert context.total_size(state['messages']) < context.policy.input_limit * context.policy.rearm_ratio
+                # Observe the reduced checkpoint before the next accumulation.
+                state.update(await context.abefore_model(state, None))
+            assert len(model.seen) == 3
+            assert state['context_summary_count'] == 3
+            assert any(m.content == 'Keep this requirement.' for m in state['messages'])
     asyncio.run(run())
 
 

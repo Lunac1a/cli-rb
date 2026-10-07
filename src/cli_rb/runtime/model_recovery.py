@@ -7,12 +7,14 @@ from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededE
 from openai import APIStatusError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
+from cli_rb.runtime.response_stream import IncompleteResponseStreamError
 
 
 def transient_model_error(error):
-    # HTTP rejection before a response stream. Do not retry interrupted streams
-    # or ambiguous transport timeouts after partial output has been displayed.
-    return isinstance(error, APIStatusError) and error.status_code in {408, 429, 500, 502, 503, 504}
+    # Incomplete Responses streams are rejected before the model returns tools.
+    return (isinstance(error, APIStatusError) and error.status_code in {408, 429, 500, 502, 503, 504}
+            or isinstance(error, ValueError) and str(error) == 'No generations found in stream.'
+            or isinstance(error, IncompleteResponseStreamError))
 
 
 def without_sdk_retries(model):

@@ -8,13 +8,14 @@ import time
 from typing import Annotated, Literal
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import hook_config
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pydantic import Field
 
 
 class AssistanceMiddleware(AgentMiddleware):
-    def __init__(self, backend, model_limit, tool_limit, seconds):
+    def __init__(self, backend, model_limit, tool_limit, seconds, *, implementation_task=False):
         self.backend = backend
         self.model_limit, self.tool_limit, self.seconds = model_limit, tool_limit, seconds
         self.context = self.requests = None
@@ -25,8 +26,11 @@ class AssistanceMiddleware(AgentMiddleware):
         self.goal = ''
         self.phase = 'ready'
         self.environment = None
+        self.implementation_task = implementation_task
+        self.implementation_feedback_sent = False
 
     def before_agent(self, state, runtime):
+        self.implementation_feedback_sent = False
         self.started, self.tool_requests, self.phase = time.monotonic(), 0, 'working'
         self.goal = next((m.text for m in reversed(state['messages']) if isinstance(m, HumanMessage)), '')
         self.backend.verification.begin_turn()
@@ -118,6 +122,33 @@ class AssistanceMiddleware(AgentMiddleware):
         self.tool_requests += 1
         return await handler(request)
 
+    @hook_config(can_jump_to=['model'])
+    async def aafter_model(self, state, runtime):
+        from cli_rb.runtime.agent import has_reply
+        last = state['messages'][-1]
+        if (not self.implementation_task or self.implementation_feedback_sent
+                or not has_reply(last) or self.requests.calls >= self.model_limit - 1):
+            return None
+        if await asyncio.to_thread(self.backend.patches.diff):
+            return None
+        self.implementation_feedback_sent = True
+        record = {'reason': 'explicit_implementation_task_without_recorded_changes',
+                  'model_calls': self.requests.calls, 'model_limit': self.model_limit,
+                  'feedback_limit': 1, 'task_success': None}
+        with (self.backend.snapshot.session / 'implementation-feedback.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(record) + '\n')
+        return {'messages': [HumanMessage(content=(
+            'Implementation-attempt check (one feedback within the existing budget): '
+            'This task explicitly requests implementation, but no change to the starting files is recorded. '
+            'An infeasibility judgement based on one assumed design does not replace an implementation attempt. '
+            'Recheck the assumptions against the allowed operations and try a small valid candidate with a '
+            'meaningful check, or provide concrete evidence of a blocker that prevents any valid attempt. '
+            'Aim for measured partial progress if the full target remains out of reach. '
+            'Do not make cosmetic edits to clear this check, weaken requirements, modify forbidden files, '
+            'rerun unchanged passing tests, or exceed the original budget. '
+            'Then give a complete final report of actual progress and remaining limitations.'))],
+                'jump_to': 'model'}
+
     async def aafter_agent(self, state, runtime):
         self.phase, self.state = 'reply_returned', state
         await asyncio.to_thread(self.collect)
@@ -158,9 +189,10 @@ class AssistanceMiddleware(AgentMiddleware):
 
 def assisted_tools(backend, tools, assistance):
     @tool
-    def run_verification(command: str, scope: str = '', timeout_seconds: int = 60,
+    def run_verification(command: str, scope: str = '',
+                         timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 60,
                          kind: Literal['test', 'check'] = 'test') -> str:
-        """Run one check and automatically save its code version, exit status, test counts and log. No registration or evidence binding needed. kind=check supports assertion/build commands; zero exit alone is not test success. scope optionally describes what is checked, not proven coverage. Existing backend permissions apply; use read_tool_log for full output."""
+        """Run one check and automatically save its code version, exit status, test counts and log. timeout_seconds: 1-60 seconds. No registration or evidence binding needed. kind=check supports assertion/build commands; zero exit alone is not test success. scope optionally describes what is checked, not proven coverage. Existing backend permissions apply; use read_tool_log for full output."""
         try:
             return backend.run_verification(command, scope or command, timeout_seconds, kind, [])
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:

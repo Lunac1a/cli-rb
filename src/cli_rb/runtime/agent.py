@@ -68,7 +68,8 @@ Do not execute or request tools, substitute passing tests for other requirements
 
 def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
                 model_call_limit=50, tool_call_limit=100, task_timeout_seconds=1800,
-                checkpointer=None, session=None, context_policy=None, harness=None):
+                checkpointer=None, session=None, context_policy=None, harness=None,
+                implementation_task=False):
     if harness is None:
         harness = 'assist' if coding else 'full'
     if harness not in {'full', 'assist'} or (harness == 'assist' and not coding):
@@ -103,7 +104,8 @@ def build_agent(model, backend: ReadBackend, *, workspace=False, coding=False,
     assistance = None
     if harness == 'assist':
         from cli_rb.runtime.assistance import AssistanceMiddleware, assisted_tools
-        assistance = AssistanceMiddleware(backend, model_call_limit, tool_call_limit, task_timeout_seconds)
+        assistance = AssistanceMiddleware(backend, model_call_limit, tool_call_limit, task_timeout_seconds,
+                                          implementation_task=implementation_task)
         tools = assisted_tools(backend, tools, assistance)
     planning = PlanningMiddleware(getattr(backend, 'verification', None)) if coding and not assistance else None
     completion = CompletionMiddleware(backend, model_call_limit) if coding and not assistance and hasattr(backend, 'verification') else None
