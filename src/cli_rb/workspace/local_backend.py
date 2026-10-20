@@ -209,8 +209,10 @@ class LocalCodingBackend(DockerCodingBackend):
         (self.logs / f'{name}.txt').write_text(result, encoding='utf-8')
         if action == 'command':
             data = json.loads(result)
-            self.command_evidence.append({'command': args['command'], 'exit_code': data['exit_code'],
-                                         'timed_out': data['timed_out'], 'log_id': name})
+            # Attempt receipts above include denials; execution evidence does not.
+            if data['started']:
+                self.command_evidence.append({'command': args['command'], 'exit_code': data['exit_code'],
+                                             'timed_out': data['timed_out'], 'log_id': name})
             return command_feedback(result, name)
         if len(result) > 16000:
             return result[:16000] + f'\n[输出截断；使用 read_tool_log，log_id={name}，offset=16000]'

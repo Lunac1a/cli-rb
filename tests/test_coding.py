@@ -89,7 +89,7 @@ def test_empty_reply_reports_evidence_without_claiming_success(capsys):
                               patches=SimpleNamespace(last_export=None))
     assert report_empty_reply([AIMessage(content="")], backend)
     text = capsys.readouterr().out
-    assert "未返回有效的最终文字答复" in text and '"exit_code": 1' in text
+    assert "未返回有效的最终文字答复" in text and "退出码 1" in text
     assert "没有自动重跑" in text and "需求全部完成" in text
     assert not report_empty_reply([AIMessage(content="完成说明")], backend)
 

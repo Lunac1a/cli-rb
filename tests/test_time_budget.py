@@ -16,7 +16,7 @@ def test_default_and_hour_option(monkeypatch):
     seen = []
     monkeypatch.setattr('cli_rb.interface.cli.chat', lambda **kwargs: seen.append(kwargs))
     assert CliRunner().invoke(app, ['--task-minutes', '60']).exit_code == 0
-    assert seen == [{'isolated': False, 'task_minutes': 60, 'resume': None}]
+    assert seen == [{'isolated': False, 'task_minutes': 60, 'resume': None, 'local': True}]
     assert CliRunner().invoke(app, ['--task-minutes', '0']).exit_code == 2
 
 

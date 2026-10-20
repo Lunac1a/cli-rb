@@ -1,6 +1,6 @@
 import json
 
-import httpx
+import httpx2 as httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI

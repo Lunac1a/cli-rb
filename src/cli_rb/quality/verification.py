@@ -228,7 +228,7 @@ class VerificationLedger:
             count = len(self.backend.command_evidence)
             feedback = None
             try:
-                self.backend.verification_command(command, timeout_seconds, kind == 'test')
+                response = self.backend.verification_command(command, timeout_seconds, kind == 'test')
                 # Read the full host-owned log, even when the model-facing output is truncated.
                 if len(self.backend.command_evidence) > count:
                     entry = self.backend.command_evidence[-1]
@@ -257,6 +257,17 @@ class VerificationLedger:
                                           and expected_failure in result.get('output', '')))
                     except (ValueError, TypeError, AttributeError):
                         record['outcome'] = 'unknown'
+                else:
+                    # A denied attempt has an audit receipt, but no execution evidence.
+                    # Docker may instead return a plain-text permission refusal.
+                    try:
+                        refusal = json.loads(response)
+                    except (ValueError, TypeError):
+                        refusal = None
+                    if isinstance(refusal, dict) and refusal.get('denied') and refusal.get('started') is False:
+                        feedback = refusal
+                        record.update(log_id=refusal['log_id'], exit_code=None,
+                                      timed_out=False, denied=True, started=False)
                 record['after'] = self.fingerprint()
             finally:
                 with self.path.open('a', encoding='utf-8') as stream:

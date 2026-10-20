@@ -25,11 +25,19 @@ def test_separate_review_logs_and_invalid_response_falls_to_human(tmp_path):
     assert rows[0]['usage']['total_tokens'] == 20 and rows[1]['decision'] == 'human'
 
 
-def test_human_denial_never_runs_or_calls_reviewer(backend):
+def test_human_denial_never_runs_or_calls_reviewer(backend, monkeypatch):
+    monkeypatch.setattr('subprocess.Popen', lambda *a, **k:
+                        (_ for _ in ()).throw(AssertionError('started denied command')))
     backend.reviewer = SimpleNamespace(review=lambda *a: (_ for _ in ()).throw(AssertionError('reviewed push')))
     backend.approve = lambda _: False
-    assert json.loads(backend.run_command('git push origin main'))['denied']
+    receipt = json.loads(backend.run_command('git push origin main'))
+    assert receipt['denied'] and receipt['started'] is False
     assert not backend.command_evidence
+    saved = json.loads((backend.logs / (receipt['log_id'] + '.json')).read_text(encoding='utf-8'))
+    assert saved['request']['args']['command'] == 'git push origin main'
+    assert json.loads(saved['result'])['denied']
+    approvals = (backend.snapshot.session / 'approvals.jsonl').read_text(encoding='utf-8')
+    assert json.loads(approvals.splitlines()[-1])['accepted'] is False
 
 
 def test_reviewed_compound_command_runs_directly_and_can_continue(backend, monkeypatch):

@@ -53,7 +53,8 @@ def test_paged_read_and_missing_file():
     )
     assert tool.invoke({"path": "a", "start_line": 3}) == "3: three"
     assert tool.invoke({"path": "missing"}).startswith("工具错误")
-    assert tool.invoke({"path": "a", "max_lines": 201}).startswith("工具错误")
+    assert tool.invoke({"path": "a", "max_lines": 400}) == "1: one\n2: two\n3: three"
+    assert tool.invoke({"path": "a", "max_lines": 401}).startswith("工具参数错误")
 
 
 def test_empty_reply_recovers_once_without_replaying_tools():

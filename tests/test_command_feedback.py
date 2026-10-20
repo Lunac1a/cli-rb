@@ -41,10 +41,21 @@ def test_failed_verification_exposes_diagnostic_and_lossless_log(backend):
     assert len(evidence['output']) < len(full['output'])
 
 
-def test_denied_verification_records_no_execution(backend):
+@pytest.mark.parametrize('prior_success', [False, True])
+def test_denied_verification_records_no_execution(backend, prior_success):
+    if prior_success:
+        previous = json.loads(backend.run_verification('exit 0', 'earlier check', kind='check'))
+        assert previous['outcome'] == 'command_succeeded'
+    evidence = list(backend.command_evidence)
     backend.approve = lambda _: False
     receipt = json.loads(backend.run_verification('Set-Content denied.txt no', 'denied check', kind='check'))
     assert receipt['command_result']['denied']
     assert receipt['command_result']['started'] is False
     assert receipt['exit_code'] is None
+    assert receipt['outcome'] == 'unknown'
+    assert backend.command_evidence == evidence
+    if prior_success:
+        assert receipt['log_id'] != previous['log_id']
+    saved = json.loads((backend.logs / (receipt['log_id'] + '.txt')).read_text(encoding='utf-8'))
+    assert saved['denied'] and saved['started'] is False
     assert not (backend.snapshot.workspace / 'denied.txt').exists()
