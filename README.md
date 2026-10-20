@@ -2,7 +2,62 @@
 
 基于 LangChain / LangGraph 的自然语言 Coding Agent，支持 OpenAI-compatible Chat Completions 和 Responses 服务。模型负责调查、规划和修改；程序负责工具执行与审批、持久化、预算与验证证据核对。
 
-项目关注 Harness 如何维持工作质量。已有执行、恢复和验证流程，但需求解释与测试覆盖仍由模型选择，不能把正常结束或局部测试通过当作任务解决。当前仍有证据替代与绑定兼容、评分日志解析及大目录搜索开销问题，尚无完整 SWE-bench 成绩。
+项目关注 **Harness 如何维持工作质量**：约束执行边界、保留可追溯证据，并在中断和上下文增长时准确报告状态。需求解释与测试覆盖仍由模型选择，正常结束或局部测试通过都不等于任务解决。项目已有工程回归与小样本对照实验，没有当前统一版本的完整 SWE-bench 成绩，也没有长期工作质量不退化的证明。
+
+**技术栈：** Python 3.12 · LangChain / LangGraph · SQLite · Docker · Responses API
+
+## 架构与设计取舍
+
+```mermaid
+flowchart TD
+    CLI["CLI / 会话入口"] --> Graph["LangChain create_agent / LangGraph"]
+    Harness["Harness：预算、上下文维护、执行状态"] --> Graph
+    Graph <--> Model["模型请求 / 流完整性 / 有限恢复"]
+    Graph <--> Tools["文件、命令与验证工具"]
+    Tools --> Local["本地后端：审批后执行"]
+    Tools --> Docker["Docker 后端：隔离执行"]
+    Graph --> Checkpoint["SQLite Checkpoint / 原文历史"]
+    Tools --> Evidence["日志 / 源码指纹 / 验证证据"]
+    Checkpoint --> Replay["离线 Replay 时间线"]
+    Evidence --> Replay
+    Tools --> Patch["补丁导出"]
+    Patch --> Score["独立 SWE-bench 评分"]
+```
+
+| 层次 | 实现与职责 | 边界 |
+| --- | --- | --- |
+| Agent Loop | `runtime/agent.py` 复用框架状态图与 middleware，模型选择调查、编辑和验证工具 | 不自行重写调度框架；不把回复返回视为任务成功 |
+| 默认 assist Harness | `runtime/assistance.py` 提供 Environment Facts、预算/修改/证据状态和验证工具 | 旧 `full` 模式的强制计划与收尾核对不在默认模式同时启用 |
+| 请求恢复 | `model_recovery.py`、`response_stream.py` 关闭 SDK 隐式重试，对指定瞬态错误有限重试，拒绝不完整流中的工具调用 | 重试当前模型请求，不重放旧工具；不承诺外部副作用 exactly-once |
+| 执行与交付 | `workspace/` 提供本地审批、Docker 后端、工作区快照与补丁导出 | 本地审批不是操作系统沙箱；容器隔离需显式选择 |
+| 证据管理 | `quality/` 记录命令、日志、测试摘要和前后源码指纹，区分当前与历史证据 | 被拒绝的命令保留审计记录，但不是执行证据；退出码为零不代表需求满足 |
+| Checkpoint / 上下文 | `persistence.py`、`context.py`、`history.py` 保存恢复位置、摘要与可检索原文 | 不确定中断需检查后恢复；摘要有成本，不能保证语义无损 |
+| Replay / 评测 | `evaluation/timeline.py` 重建消息、工具与证据；求解和官方评分分离 | Replay 不重新执行工具；评分信息不进入求解输入 |
+
+## 验证结果与实验结论
+
+以下结果测量不同对象，**不能合并为一个通过率，也不能作为当前 master 的统一成绩**。测试证据核对日期为 2026-10-21。
+
+| 类型 | 版本与范围 | 已记录结果 | 可以得出的结论 |
+| --- | --- | --- | --- |
+| 工程回归 | 独立修复提交 `b58c509ccd65496876b6aa2fbd8a4cf3e1008f01`，Windows 11 build 26300 / Python 3.12.10 | **397 passed、14 skipped、0 failed**；Ruff、锁文件与依赖一致性检查通过 | 该提交的默认离线套件通过；14项 Docker 集成测试跳过，不能写作全部测试通过 |
+| SWE-bench 历史累计 | 六批、150个不同任务，跨多个 Harness 版本 | **99 solved、49 failed、2 unknown**；累计确认解决率99/150（66.0%） | 描述历史运行规模；不是单一版本成绩，不证明优化收益 |
+| Environment Facts A/B | 冻结 Luna v3；`gpt-6-luna` / `medium`；3道已曝光开发题，各组各题一次 | A/B均 **2/3 solved**；环境不匹配请求 **1/1**；共102次模型HTTP、1,647,862 tokens | 未达到“环境不匹配请求严格减少”的预设正向信号；不宣称质量或泛化提升 |
+| Responses Smoke | 独立 Luna Smoke，真实流式请求和工具往返 | 2次HTTP、9,063 tokens，工具结果回传成功 | 验证该端点的基本链路；不代表长期负载、全部恢复路径或真实 encrypted reasoning 转发已验证 |
+
+工程修复覆盖拒绝命令的证据语义、Responses 测试 transport 与正式客户端的一致性，以及过时断言；没有通过放宽安全校验获得通过结果。完整回归在提交前执行，八个修复文件哈希与提交内容核对一致。分组测试是全套的子集，不能重复累加。
+
+### A/B 如何控制变量
+
+- A为默认 assist + Environment Facts，B为assist仅关闭整个Environment Facts功能包；任务、源码、模型、推理强度、预算、每题Docker镜像和官方评分配置固定。
+- 配对顺序为 Django A→B、sklearn B→A、SymPy A→B；六个cell各运行一次，不因质量失败追加尝试。Sol v2保留冻结记录，但没有运行正式Sol对照实验。
+- 求解器只接收公开任务和固定版本仓库；参考补丁、隐藏测试与评分材料放在求解工作区之外。保留原始轨迹、补丁、用量、评分和异常，基础设施未知不伪装成解题失败或成功。
+- A共806,319 tokens，B共841,543 tokens；这组观察不能从Token差异推出机制因果。三题已曝光、每cell一次且Replay审阅非盲，未估计统计显著性；不能写作“显著提升”或“已证明无效”。
+- 客户端HTTP/Token准入额度是执行停止条件，不是账单硬上限；正式批次实际金额未验证。
+
+后续离线验证覆盖研究也未提供足够的可靠触发证据，因此没有新增 Harness 机制。负面结果被保留，研究已经结束。
+
+原始实验与审计材料在本地保存，不随仓库分发；此处是结果摘要，公开仓库不包含完整复现实验包。当前仍需明确区分Linux/通用Docker回归、便携包版本、长上下文质量及跨供应商行为的验证范围。
 
 ## Windows 双击试用
 
